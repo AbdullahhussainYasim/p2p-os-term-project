@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P Resource Sharing System - Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1><i class="fas fa-network-wired"></i> P2P Resource Sharing System</h1>
+            <div class="header-info">
+                <span id="peer-info">Peer: Loading...</span>
+                <span id="status-indicator" class="status-indicator">
+                    <i class="fas fa-circle"></i> <span>Connecting...</span>
+                </span>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="tabs">
+            <button class="tab-btn active" onclick="showTab('dashboard')" title="View system statistics and real-time metrics">
+                <i class="fas fa-tachometer-alt"></i> Dashboard
+                <span class="tab-hint">System overview & stats</span>
+            </button>
+            <button class="tab-btn" onclick="showTab('cpu')" title="Execute Python programs remotely or locally">
+                <i class="fas fa-microchip"></i> CPU Tasks
+                <span class="tab-hint">Run code & view history</span>
+            </button>
+            <button class="tab-btn" onclick="showTab('memory')" title="Store and retrieve key-value data">
+                <i class="fas fa-memory"></i> Memory
+                <span class="tab-hint">Key-value storage</span>
+            </button>
+            <button class="tab-btn" onclick="showTab('files')" title="Upload and download files">
+                <i class="fas fa-folder"></i> Files
+                <span class="tab-hint">File storage</span>
+            </button>
+            <button class="tab-btn" onclick="showTab('processes')" title="View process tree and manage processes">
+                <i class="fas fa-sitemap"></i> Processes
+                <span class="tab-hint">Process management</span>
+            </button>
+            <button class="tab-btn" onclick="showTab('os')" title="OS features: scheduling, deadlock detection, memory management">
+                <i class="fas fa-server"></i> OS Features
+                <span class="tab-hint">Scheduling & deadlocks</span>
+            </button>
+        </nav>
+
+        <!-- Dashboard Tab -->
+        <div id="dashboard" class="tab-content active">
+            <div class="tab-description">
+                <h2><i class="fas fa-tachometer-alt"></i> System Dashboard</h2>
+                <p class="description-text">View real-time system statistics, task execution metrics, and overall system health. This dashboard updates automatically every 2 seconds.</p>
+            </div>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-tasks"></i></div>
+                    <div class="stat-info">
+                        <h3 id="total-tasks">-</h3>
+                        <p>Total Tasks</p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
+                    <div class="stat-info">
+                        <h3 id="completed-tasks">-</h3>
+                        <p>Completed</p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-clock"></i></div>
+                    <div class="stat-info">
+                        <h3 id="queue-size">-</h3>
+                        <p>Queue Size</p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-percentage"></i></div>
+                    <div class="stat-info">
+                        <h3 id="cpu-load">-</h3>
+                        <p>CPU Load</p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-database"></i></div>
+                    <div class="stat-info">
+                        <h3 id="memory-keys">-</h3>
+                        <p>Memory Keys</p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-hdd"></i></div>
+                    <div class="stat-info">
+                        <h3 id="file-count">-</h3>
+                        <p>Files Stored</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="dashboard-sections">
+                <div class="section">
+                    <h3><i class="fas fa-chart-line"></i> Recent Activity</h3>
+                    <div id="recent-activity" class="activity-list"></div>
+                </div>
+                <div class="section">
+                    <h3><i class="fas fa-info-circle"></i> System Information</h3>
+                    <div id="system-info" class="info-box"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CPU Tasks Tab -->
+        <div id="cpu" class="tab-content">
+            <div class="tab-description">
+                <h2><i class="fas fa-microchip"></i> CPU Task Execution</h2>
+                <p class="description-text">Execute Python programs on this peer or remote peers. Tasks can be marked as confidential (local only) or distributed across the network. View execution history and results.</p>
+            </div>
+            
+            <div class="form-section">
+                <h3>Execute New Task</h3>
+                <form id="task-form" class="task-form">
+                    <div class="form-group">
+                        <label>Program Code (Python):</label>
+                        <textarea id="program-code" rows="10" placeholder="def main(x):&#10;    return x * x"></textarea>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Function Name:</label>
+                            <input type="text" id="function-name" value="main" placeholder="main">
+                        </div>
+                        <div class="form-group">
+                            <label>Arguments (JSON array):</label>
+                            <input type="text" id="task-args" value="[5]" placeholder="[5]">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Priority:</label>
+                            <input type="number" id="task-priority" value="0" min="-10" max="10">
+                        </div>
+                        <div class="form-group">
+                            <label>Max Retries:</label>
+                            <input type="number" id="task-retries" value="0" min="0" max="10">
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="task-confidential">
+                                Confidential (Local Only)
+                            </label>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-play"></i> Execute Task
+                    </button>
+                </form>
+            </div>
+
+            <div class="section">
+                <h3>Last Task Result</h3>
+                <div id="cpu-task-result" class="info-box">
+                    <p>No task executed yet.</p>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>Task History</h3>
+                <div id="task-history" class="history-list"></div>
+            </div>
+        </div>
+
+        <!-- Memory Tab -->
+        <div id="memory" class="tab-content">
+            <div class="tab-description">
+                <h2><i class="fas fa-memory"></i> Memory Management</h2>
+                <p class="description-text">Store and retrieve key-value pairs in the peer's memory. This is a simple distributed storage system where each peer maintains its own key-value store.</p>
+            </div>
+            
+            <div class="form-section">
+                <h3>Set Memory Value</h3>
+                <form id="memory-set-form" class="inline-form">
+                    <div class="form-group">
+                        <input type="text" id="mem-key" placeholder="Key" required>
+                    </div>
+                    <div class="form-group">
+                        <input type="text" id="mem-value" placeholder="Value" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-save"></i> Set
+                    </button>
+                </form>
+            </div>
+
+            <div class="form-section">
+                <h3>Get Memory Value</h3>
+                <form id="memory-get-form" class="inline-form">
+                    <div class="form-group">
+                        <input type="text" id="get-mem-key" placeholder="Key" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-search"></i> Get
+                    </button>
+                </form>
+                <div id="memory-result" class="result-box"></div>
+            </div>
+
+            <div class="section">
+                <h3>All Memory Keys</h3>
+                <button onclick="loadMemoryKeys()" class="btn btn-secondary">
+                    <i class="fas fa-sync"></i> Refresh
+                </button>
+                <button onclick="deleteSelectedKey()" class="btn btn-secondary" style="margin-left: 10px;">
+                    <i class="fas fa-trash"></i> Delete Selected
+                </button>
+                <div id="memory-keys" class="keys-list" style="margin-top: 15px;"></div>
+            </div>
+        </div>
+
+        <!-- Files Tab -->
+        <div id="files" class="tab-content">
+            <div class="tab-description">
+                <h2><i class="fas fa-folder"></i> File Management</h2>
+                <p class="description-text">Upload files to this peer's storage and download them later. Files are stored locally on the peer and can be shared across the network.</p>
+            </div>
+            
+            <div class="form-section">
+                <h3>Upload File</h3>
+                <form id="file-upload-form" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <input type="file" id="file-input" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-upload"></i> Upload
+                    </button>
+                </form>
+            </div>
+
+            <div class="form-section" style="margin-top: 30px;">
+                <h3>Search Network for File</h3>
+                <form id="file-search-form" class="inline-form">
+                    <div class="form-group">
+                        <input type="text" id="search-filename" placeholder="Enter filename to search" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-search"></i> Search Network
+                    </button>
+                </form>
+                <div id="file-search-results" style="margin-top: 15px;"></div>
+            </div>
+
+            <div class="form-section" style="margin-top: 30px;">
+                <h3>Download from Network</h3>
+                <form id="file-download-network-form" class="inline-form">
+                    <div class="form-group">
+                        <input type="text" id="download-network-filename" placeholder="Enter filename to download" required>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="use-multipeer" checked> Use Multi-Peer Download
+                        </label>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-download"></i> Download from Network
+                    </button>
+                </form>
+                <div id="file-download-status" style="margin-top: 15px;"></div>
+            </div>
+
+            <div class="section">
+                <h3>Stored Files</h3>
+                <button onclick="loadFiles()" class="btn btn-secondary">
+                    <i class="fas fa-sync"></i> Refresh
+                </button>
+                <div id="files-list" class="files-list" style="margin-top: 15px;"></div>
+            </div>
+        </div>
+
+        <!-- Processes Tab -->
+        <div id="processes" class="tab-content">
+            <div class="tab-description">
+                <h2><i class="fas fa-sitemap"></i> Process Management</h2>
+                <p class="description-text">View the process tree showing parent-child relationships between processes. Monitor process states and statistics. This demonstrates OS process hierarchy concepts.</p>
+            </div>
+            
+            <div class="section">
+                <button onclick="loadProcessTree()" class="btn btn-secondary">
+                    <i class="fas fa-sync"></i> Refresh Process Tree
+                </button>
+                <div id="process-tree" class="tree-view"></div>
+            </div>
+
+            <div class="section">
+                <h3>Process Statistics</h3>
+                <div id="process-stats" class="info-box"></div>
+            </div>
+        </div>
+
+        <!-- OS Features Tab -->
+        <div id="os" class="tab-content">
+            <div class="tab-description">
+                <h2><i class="fas fa-server"></i> Operating System Features</h2>
+                <p class="description-text">Advanced OS features: Change CPU scheduling algorithms (FCFS, SJF, Priority, Round Robin), detect deadlocks using Banker's Algorithm, and monitor memory management with fragmentation tracking.</p>
+            </div>
+            
+            <div class="form-section">
+                <h3>Scheduling Algorithm</h3>
+                <form id="scheduler-form" class="inline-form">
+                    <div class="form-group">
+                        <select id="scheduler-algorithm">
+                            <option value="FCFS">FCFS (First Come First Served)</option>
+                            <option value="SJF">SJF (Shortest Job First)</option>
+                            <option value="PRIORITY">Priority</option>
+                            <option value="RR">Round Robin</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-cog"></i> Change Algorithm
+                    </button>
+                </form>
+            </div>
+
+            <div class="section">
+                <h3>Deadlock Detection</h3>
+                <button onclick="checkDeadlock()" class="btn btn-warning">
+                    <i class="fas fa-exclamation-triangle"></i> Check for Deadlocks
+                </button>
+                <div id="deadlock-result" class="result-box"></div>
+            </div>
+
+            <div class="section">
+                <h3>Memory Management</h3>
+                <button onclick="loadMemoryInfo()" class="btn btn-secondary">
+                    <i class="fas fa-sync"></i> Refresh Memory Info
+                </button>
+                <div id="memory-mgmt-info" class="info-box" style="margin-top: 15px;">
+                    <p style="color: #6c757d; text-align: center;">Click Refresh to load memory management information</p>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>Resource Allocation</h3>
+                <button onclick="loadResourceInfo()" class="btn btn-secondary">
+                    <i class="fas fa-sync"></i> Refresh Resource Info
+                </button>
+                <div id="resource-info" class="info-box" style="margin-top: 15px;">
+                    <p style="color: #6c757d; text-align: center;">Click Refresh to load resource allocation information</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toast" class="toast"></div>
+
+    <!-- Debug Panel (press Ctrl+D to toggle) -->
+    <div id="debug-panel" class="debug-panel" style="display: none;">
+        <h3>Debug Information</h3>
+        <button onclick="document.getElementById('debug-panel').style.display='none'" class="btn btn-secondary">Close</button>
+        <div id="debug-content" class="info-box"></div>
+    </div>
+
+    <script>
+        // Debug mode - press Ctrl+D
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey && e.key === 'd') {
+                e.preventDefault();
+                const panel = document.getElementById('debug-panel');
+                panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+                if (panel.style.display === 'block') {
+                    updateDebugInfo();
+                }
+            }
+        });
+
+        async function updateDebugInfo() {
+            const content = document.getElementById('debug-content');
+            const info = {
+                'API Status': await testApi('/api/status'),
+                'API History': await testApi('/api/history'),
+                'API Memory List': await testApi('/api/memory/list'),
+                'API Files List': await testApi('/api/file/list'),
+                'API Processes': await testApi('/api/processes'),
+                'Peer Instance': 'Check server logs'
+            };
+            content.innerHTML = '<pre>' + JSON.stringify(info, null, 2) + '</pre>';
+        }
+
+        async function testApi(endpoint) {
+            try {
+                const response = await fetch(endpoint);
+                const data = await response.json();
+                return response.ok ? 'OK' : `Error: ${data.error || response.statusText}`;
+            } catch (error) {
+                return `Error: ${error.message}`;
+            }
+        }
+    </script>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
+
