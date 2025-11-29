@@ -264,6 +264,16 @@
                         </select>
                     </div>
                     <div class="form-group">
+                        <label>Select Target Peer (or enter manually):</label>
+                        <select id="peer-select-dropdown" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 10px;"
+                                onchange="handlePeerDropdownChange()">
+                            <option value="">-- Select a peer or enter manually --</option>
+                        </select>
+                        <button type="button" onclick="loadAvailablePeers()" class="btn btn-secondary" style="width: 100%;">
+                            <i class="fas fa-sync"></i> Refresh Peer List
+                        </button>
+                    </div>
+                    <div class="form-group">
                         <label>Target Peer IP:</label>
                         <input type="text" id="upload-remote-ip" placeholder="e.g., 192.168.1.100" required>
                     </div>
@@ -276,11 +286,6 @@
                         <input type="number" id="upload-remote-replication" value="1" min="1" max="5" 
                                title="Number of peers to store the file on (for redundancy)">
                         <small style="color: #6c757d;">(1 = single peer, 2+ = replicated for redundancy)</small>
-                    </div>
-                    <div class="form-group">
-                        <button type="button" onclick="loadAvailablePeers()" class="btn btn-secondary" style="width: 100%;">
-                            <i class="fas fa-list"></i> Load Available Peers
-                        </button>
                     </div>
                     <div id="available-peers-list" style="margin-top: 10px;"></div>
                     <button type="submit" class="btn btn-primary" style="margin-top: 15px;">

@@ -395,16 +395,31 @@ def list_peers():
         msg = messages.create_message(messages.MessageType.STATUS)
         response = peer_instance._send_to_tracker(msg)
         
-        if response and response.get("status") == "OK":
+        if not response:
+            return jsonify({
+                "error": "No response from tracker. Make sure tracker is running.",
+                "success": False
+            }), 500
+        
+        if response.get("status") == "OK":
             peers_data = response.get("data", {})
             peer_list = peers_data.get("peers", [])
             
-            # Format peer list
+            # Format peer list and exclude current peer
             peers = []
+            current_peer_key = (peer_instance.peer_ip, peer_instance.peer_port)
+            
             for peer_info in peer_list:
+                peer_ip = peer_info.get("ip")
+                peer_port = peer_info.get("port")
+                
+                # Skip current peer (don't show yourself in the list)
+                if (peer_ip, peer_port) == current_peer_key:
+                    continue
+                
                 peers.append({
-                    "ip": peer_info.get("ip"),
-                    "port": peer_info.get("port"),
+                    "ip": peer_ip,
+                    "port": peer_port,
                     "cpu_load": peer_info.get("cpu_load", 0.0),
                     "last_update": peer_info.get("last_update")
                 })
@@ -412,15 +427,24 @@ def list_peers():
             return jsonify({
                 "success": True,
                 "peers": peers,
-                "count": len(peers)
+                "count": len(peers),
+                "total_peers_on_tracker": len(peer_list),
+                "current_peer": f"{peer_instance.peer_ip}:{peer_instance.peer_port}"
             })
         else:
-            return jsonify({"error": "Failed to get peer list from tracker"}), 500
+            error_msg = response.get("error", "Unknown error")
+            return jsonify({
+                "error": f"Tracker returned error: {error_msg}",
+                "success": False
+            }), 500
             
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": f"Exception: {str(e)}",
+            "success": False
+        }), 500
 
 
 @app.route('/api/history', methods=['GET'])

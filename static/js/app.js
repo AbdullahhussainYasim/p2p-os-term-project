@@ -93,6 +93,7 @@ function showTab(tabName) {
         loadFiles();
         populateRemoteUploadFiles();
         loadOwnedFiles();
+        loadAvailablePeers(); // Auto-load peers when Files tab opens
     } else if (tabName === 'processes') {
         loadProcessTree();
     } else if (tabName === 'os') {
@@ -776,45 +777,78 @@ async function deleteFile(filename) {
 // Load available peers from tracker
 async function loadAvailablePeers() {
     const peersListDiv = document.getElementById('available-peers-list');
-    peersListDiv.innerHTML = '<p style="color: #6c757d;">Loading peers...</p>';
+    peersListDiv.innerHTML = '<p style="color: #6c757d;">Loading peers from tracker...</p>';
     
     try {
         const response = await fetch('/api/peers/list');
         const result = await response.json();
         
         if (result.error || !result.success) {
-            peersListDiv.innerHTML = `<p style="color: #ef4444;">Error: ${result.error || 'Failed to load peers'}</p>`;
+            peersListDiv.innerHTML = `
+                <div style="background: #fff3cd; padding: 10px; border-radius: 4px; border: 1px solid #ffc107;">
+                    <strong>⚠ Error:</strong> ${result.error || 'Failed to load peers'}<br>
+                    <small>Make sure the tracker is running and peers are registered.</small>
+                </div>
+            `;
             return;
         }
         
         const peers = result.peers || [];
         
         if (peers.length === 0) {
-            peersListDiv.innerHTML = '<p style="color: #6c757d;">No other peers available on the network.</p>';
+            peersListDiv.innerHTML = `
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 4px; border: 1px solid #ddd;">
+                    <strong>No other peers available</strong><br>
+                    <small style="color: #6c757d;">
+                        Make sure other peers are running and connected to the same tracker.
+                        You can also manually enter a peer's IP and port below.
+                    </small>
+                </div>
+            `;
             return;
         }
         
+        // Also populate dropdown
+        const peerSelect = document.getElementById('peer-select-dropdown');
+        if (peerSelect) {
+            peerSelect.innerHTML = '<option value="">-- Select a peer --</option>';
+            peers.forEach(peer => {
+                const option = document.createElement('option');
+                option.value = `${peer.ip}:${peer.port}`;
+                option.textContent = `${peer.ip}:${peer.port} (Load: ${peer.cpu_load.toFixed(2)})`;
+                peerSelect.appendChild(option);
+            });
+        }
+        
         peersListDiv.innerHTML = `
-            <div style="background: #f8f9fa; padding: 15px; border-radius: 4px; margin-bottom: 10px;">
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 4px; margin-bottom: 10px; border: 1px solid #ddd;">
                 <strong>Available Peers (${peers.length}):</strong>
                 <div style="margin-top: 10px;">
                     ${peers.map(peer => `
-                        <div style="padding: 8px; margin: 5px 0; background: white; border-radius: 4px; cursor: pointer; border: 1px solid #ddd;"
+                        <div style="padding: 10px; margin: 5px 0; background: white; border-radius: 4px; cursor: pointer; border: 2px solid #007bff; transition: all 0.2s;"
                              onclick="selectPeer('${peer.ip}', ${peer.port})"
-                             onmouseover="this.style.borderColor='#007bff'"
-                             onmouseout="this.style.borderColor='#ddd'">
-                            <strong>${peer.ip}:${peer.port}</strong>
-                            <span style="color: #6c757d; font-size: 0.9em;"> (Load: ${peer.cpu_load.toFixed(2)})</span>
+                             onmouseover="this.style.backgroundColor='#e7f3ff'; this.style.transform='scale(1.02)'"
+                             onmouseout="this.style.backgroundColor='white'; this.style.transform='scale(1)'">
+                            <strong style="color: #007bff;">${peer.ip}:${peer.port}</strong>
+                            <span style="color: #6c757d; font-size: 0.9em; display: block; margin-top: 4px;">
+                                CPU Load: ${peer.cpu_load.toFixed(2)} | Click to select
+                            </span>
                         </div>
                     `).join('')}
                 </div>
-                <p style="font-size: 0.85em; color: #6c757d; margin-top: 10px;">
-                    Click on a peer to auto-fill the IP and port fields.
+                <p style="font-size: 0.85em; color: #6c757d; margin-top: 10px; font-weight: bold;">
+                    💡 Click on any peer above to auto-fill the IP and port fields, or use the dropdown below.
                 </p>
             </div>
         `;
     } catch (error) {
-        peersListDiv.innerHTML = `<p style="color: #ef4444;">Error: ${error.message}</p>`;
+        peersListDiv.innerHTML = `
+            <div style="background: #f8d7da; padding: 10px; border-radius: 4px; border: 1px solid #dc3545;">
+                <strong>Error:</strong> ${error.message}<br>
+                <small>Check console for details.</small>
+            </div>
+        `;
+        console.error('Error loading peers:', error);
     }
 }
 
@@ -822,7 +856,32 @@ async function loadAvailablePeers() {
 function selectPeer(ip, port) {
     document.getElementById('upload-remote-ip').value = ip;
     document.getElementById('upload-remote-port').value = port;
+    
+    // Also update dropdown if it exists
+    const dropdown = document.getElementById('peer-select-dropdown');
+    if (dropdown) {
+        const value = `${ip}:${port}`;
+        for (let i = 0; i < dropdown.options.length; i++) {
+            if (dropdown.options[i].value === value) {
+                dropdown.selectedIndex = i;
+                break;
+            }
+        }
+    }
+    
     showToast(`Selected peer: ${ip}:${port}`, 'success');
+}
+
+// Handle peer dropdown change
+function handlePeerDropdownChange() {
+    const dropdown = document.getElementById('peer-select-dropdown');
+    const value = dropdown.value;
+    
+    if (value) {
+        const [ip, port] = value.split(':');
+        document.getElementById('upload-remote-ip').value = ip;
+        document.getElementById('upload-remote-port').value = port;
+    }
 }
 
 // Populate file dropdown for remote upload
