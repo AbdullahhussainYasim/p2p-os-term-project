@@ -8,8 +8,6 @@ import threading
 import logging
 import time
 import base64
-import os
-from pathlib import Path
 from typing import Dict, Optional, List, Tuple, Any
 from datetime import datetime
 
@@ -95,13 +93,6 @@ class Peer:
         self.pending_results: Dict[str, Any] = {}
         self.result_lock = threading.Lock()
         self.task_process_map: Dict[str, str] = {}
-        
-        # Owned file tracking
-        # Maps filename -> list of (storage_ip, storage_port) where file is stored
-        self.owned_files: Dict[str, List[Tuple[str, int]]] = {}
-        # Maps filename -> (owner_ip, owner_port) for files stored for others
-        self.stored_for_others: Dict[str, Tuple[str, int]] = {}
-        self.ownership_lock = threading.Lock()
     
     def _get_local_ip(self) -> str:
         """Get local IP address for external connections."""
@@ -132,8 +123,6 @@ class Peer:
         # Register with tracker
         self._register_with_tracker()
         self._register_existing_files()
-        # Reconstruct owned file metadata from disk
-        self._reconstruct_owned_files_metadata()
         
         # Start heartbeat thread
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
@@ -204,38 +193,6 @@ class Peer:
         except Exception as e:
             logger.debug(f"Error registering existing files: {e}")
     
-    def _reconstruct_owned_files_metadata(self):
-        """Reconstruct owned file metadata from files on disk after restart."""
-        try:
-            owned_storage_base = Path(config.OWNED_STORAGE_DIR)
-            if not owned_storage_base.exists():
-                return
-            
-            with self.ownership_lock:
-                # Scan owner directories: owned_storage/{owner_ip}_{owner_port}/
-                for owner_dir in owned_storage_base.iterdir():
-                    if owner_dir.is_dir():
-                        # Parse owner from directory name: {owner_ip}_{owner_port}
-                        # Note: IP might have changed, but port is stable identifier
-                        parts = owner_dir.name.split("_", 1)
-                        if len(parts) == 2:
-                            try:
-                                owner_ip = parts[0]  # May be old IP
-                                owner_port = int(parts[1])
-                                
-                                # Scan files in this owner's directory
-                                for file_path in owner_dir.iterdir():
-                                    if file_path.is_file():
-                                        original_filename = file_path.name
-                                        # Reconstruct the metadata
-                                        # Note: IP will be updated when owner requests file with new IP
-                                        self.stored_for_others[original_filename] = (owner_ip, owner_port)
-                                        logger.info(f"Reconstructed owned file metadata: {original_filename} for owner {owner_ip}:{owner_port} (port {owner_port})")
-                            except (ValueError, IndexError) as e:
-                                logger.debug(f"Could not parse owner directory {owner_dir.name}: {e}")
-        except Exception as e:
-            logger.error(f"Error reconstructing owned files metadata: {e}")
-    
     def _unregister_from_tracker(self):
         """Unregister this peer from the tracker."""
         try:
@@ -249,8 +206,7 @@ class Peer:
             logger.debug(f"Error unregistering from tracker: {e}")
     
     def _heartbeat_loop(self):
-        """Periodically update tracker with current load and report owned files."""
-        report_counter = 0
+        """Periodically update tracker with current load."""
         while self.running:
             time.sleep(config.HEARTBEAT_INTERVAL)
             
@@ -263,13 +219,6 @@ class Peer:
                     cpu_load=current_load
                 )
                 self._send_to_tracker(msg)
-                
-                # Periodically report owned files (every 5 heartbeats = ~50 seconds)
-                # This helps rebuild tracker registry if it restarted
-                report_counter += 1
-                if report_counter >= 5:
-                    self._report_owned_files_to_tracker()
-                    report_counter = 0
             except Exception as e:
                 logger.debug(f"Error sending heartbeat: {e}")
     
@@ -322,12 +271,6 @@ class Peer:
             return self._handle_put_file(msg)
         elif msg_type == messages.MessageType.GET_FILE:
             return self._handle_get_file(msg)
-        elif msg_type == messages.MessageType.UPLOAD_TO_PEER:
-            return self._handle_upload_to_peer(msg)
-        elif msg_type == messages.MessageType.GET_OWNED_FILE:
-            return self._handle_get_owned_file(msg)
-        elif msg_type == messages.MessageType.DELETE_OWNED_FILE:
-            return self._handle_delete_owned_file(msg)
         elif msg_type == messages.MessageType.STATUS:
             return self._handle_status()
         elif msg_type == messages.MessageType.TASK_HISTORY:
@@ -581,21 +524,6 @@ class Peer:
         if not filename:
             return messages.create_error_message("Filename required for GET_FILE")
         
-        # Security: Prevent access to owned files through regular GET_FILE
-        # Owned files can only be accessed via GET_OWNED_FILE with ownership verification
-        owned_storage_base = Path(config.OWNED_STORAGE_DIR)
-        if owned_storage_base.exists():
-            for owner_dir in owned_storage_base.iterdir():
-                if owner_dir.is_dir():
-                    file_path = owner_dir / filename
-                    if file_path.exists():
-                        return messages.create_message(
-                            messages.MessageType.FILE_RESPONSE,
-                            filename=filename,
-                            found=False,
-                            error="File is in owned storage and requires ownership verification"
-                        )
-        
         try:
             data = self.file_storage.get_file(filename)
             
@@ -618,260 +546,6 @@ class Peer:
             )
         except Exception as e:
             return messages.create_error_message(f"GET_FILE failed: {e}")
-    
-    def _handle_upload_to_peer(self, msg: Dict) -> Dict:
-        """
-        Handle file upload request from another peer.
-        Stores file and records ownership information.
-        """
-        filename = msg.get("filename")
-        data_b64 = msg.get("data")
-        owner_ip = msg.get("owner_ip")
-        owner_port = msg.get("owner_port")
-        
-        if not filename:
-            return messages.create_error_message("Filename required")
-        if not data_b64:
-            return messages.create_error_message("Data required")
-        if not owner_ip or not owner_port:
-            return messages.create_error_message("Owner IP and port required")
-        
-        try:
-            # Decode base64 data
-            data = base64.b64decode(data_b64)
-            
-            # Check file size
-            if len(data) > config.MAX_FILE_SIZE:
-                return messages.create_error_message(f"File too large (max {config.MAX_FILE_SIZE} bytes)")
-            
-            # Check quota
-            allowed, error = self.quota.check_storage_quota(len(data))
-            if not allowed:
-                return messages.create_error_message(error)
-            
-            # Store file in separate owned storage directory, isolated by owner
-            # Structure: owned_storage/{owner_ip}_{owner_port}/filename
-            owned_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
-            owned_storage_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Sanitize filename to prevent directory traversal
-            safe_filename = os.path.basename(filename)
-            if not safe_filename or safe_filename in ('.', '..'):
-                return messages.create_error_message(f"Invalid filename: {filename}")
-            
-            file_path = owned_storage_dir / safe_filename
-            
-            # Write file with restricted permissions (readable only by owner process)
-            import stat
-            with open(file_path, 'wb') as f:
-                f.write(data)
-            # Set file permissions: owner read/write only (0o600)
-            os.chmod(file_path, stat.S_IRUSR | stat.S_IWUSR)
-            
-            # Record ownership
-            with self.ownership_lock:
-                self.stored_for_others[filename] = (owner_ip, owner_port)
-            
-            logger.info(f"Stored owned file: {filename} for owner {owner_ip}:{owner_port} in isolated directory")
-            
-            return messages.create_status_message("OK", {
-                "operation": "UPLOAD_TO_PEER",
-                "filename": filename,
-                "size": len(data)
-            })
-        except Exception as e:
-            logger.error(f"UPLOAD_TO_PEER failed: {e}")
-            return messages.create_error_message(f"UPLOAD_TO_PEER failed: {e}")
-    
-    def _handle_get_owned_file(self, msg: Dict) -> Dict:
-        """
-        Handle request to get an owned file.
-        Only returns file if requester is the owner.
-        """
-        filename = msg.get("filename")
-        requester_ip = msg.get("requester_ip")
-        requester_port = msg.get("requester_port")
-        
-        if not filename:
-            return messages.create_error_message("Filename required")
-        if not requester_ip or not requester_port:
-            return messages.create_error_message("Requester IP and port required")
-        
-        # Check if we have this file stored for the requester
-        # First, try to reconstruct metadata if not found (in case peer restarted)
-        with self.ownership_lock:
-            if filename not in self.stored_for_others:
-                # Try to find the file in owned storage directories
-                logger.debug(f"File '{filename}' not in metadata, checking owned storage directories...")
-                owned_storage_base = Path(config.OWNED_STORAGE_DIR)
-                if owned_storage_base.exists():
-                    for owner_dir in owned_storage_base.iterdir():
-                        if owner_dir.is_dir():
-                            file_path = owner_dir / filename
-                            if file_path.exists() and file_path.is_file():
-                                # Found it! Parse owner from directory name
-                                parts = owner_dir.name.split("_", 1)
-                                if len(parts) == 2:
-                                    owner_ip = parts[0]
-                                    owner_port = int(parts[1])
-                                    self.stored_for_others[filename] = (owner_ip, owner_port)
-                                    logger.info(f"Reconstructed metadata for {filename} from owned storage")
-                                    break
-        
-        with self.ownership_lock:
-            logger.debug(f"GET_OWNED_FILE request: filename={filename}, requester={requester_ip}:{requester_port}")
-            logger.debug(f"Stored files for others: {list(self.stored_for_others.keys())}")
-            
-            if filename not in self.stored_for_others:
-                logger.warning(f"File '{filename}' not found in stored_for_others. Available files: {list(self.stored_for_others.keys())}")
-                return messages.create_message(
-                    messages.MessageType.OWNED_FILE_RESPONSE,
-                    filename=filename,
-                    found=False,
-                    error=f"File not found on this peer. Available owned files: {list(self.stored_for_others.keys())}"
-                )
-            
-            owner_ip, owner_port = self.stored_for_others[filename]
-            logger.debug(f"File found, owner: {owner_ip}:{owner_port}, requester: {requester_ip}:{requester_port}")
-            
-            # Verify ownership - use port as primary identifier (handles IP changes)
-            if int(owner_port) != int(requester_port):
-                logger.warning(f"Port mismatch: owner port={owner_port}, requester port={requester_port}")
-                return messages.create_message(
-                    messages.MessageType.OWNED_FILE_RESPONSE,
-                    filename=filename,
-                    found=False,
-                    error="Not authorized: Port mismatch - you are not the owner of this file"
-                )
-            
-            # If IP changed but port matches, update metadata and potentially rename directory
-            if str(owner_ip) != str(requester_ip):
-                logger.info(f"IP changed for owner: {owner_ip}:{owner_port} -> {requester_ip}:{requester_port}")
-                
-                # Update metadata
-                self.stored_for_others[filename] = (requester_ip, requester_port)
-                
-                # Check if we need to rename the storage directory
-                old_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
-                new_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{requester_ip}_{requester_port}"
-                
-                if old_storage_dir.exists() and not new_storage_dir.exists():
-                    try:
-                        # Move the entire directory to new name
-                        old_storage_dir.rename(new_storage_dir)
-                        logger.info(f"Renamed owned storage directory: {old_storage_dir} -> {new_storage_dir}")
-                    except Exception as e:
-                        logger.warning(f"Could not rename directory (will use old path): {e}")
-                        # Continue with old path - file should still be accessible
-                
-                owner_ip = requester_ip  # Use new IP for file path
-        
-        # Get file from isolated owned storage directory
-        # Try new IP first, fallback to old IP if directory rename failed
-        owned_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
-        safe_filename = os.path.basename(filename)
-        file_path = owned_storage_dir / safe_filename
-        
-        # If file not found, try old IP directory (in case rename didn't happen)
-        if not file_path.exists():
-            # Try to find directory by port only
-            owned_storage_base = Path(config.OWNED_STORAGE_DIR)
-            if owned_storage_base.exists():
-                for owner_dir in owned_storage_base.iterdir():
-                    if owner_dir.is_dir() and owner_dir.name.endswith(f"_{owner_port}"):
-                        alt_file_path = owner_dir / safe_filename
-                        if alt_file_path.exists():
-                            file_path = alt_file_path
-                            logger.info(f"Found file in alternative directory: {file_path}")
-                            break
-        
-        logger.debug(f"Looking for owned file: {file_path}")
-        
-        try:
-            if not file_path.exists():
-                logger.warning(f"Owned file not found at: {file_path}")
-                return messages.create_message(
-                    messages.MessageType.OWNED_FILE_RESPONSE,
-                    filename=filename,
-                    found=False,
-                    error=f"File data not found at: {file_path}"
-                )
-            
-            # Read file with restricted access
-            with open(file_path, 'rb') as f:
-                data = f.read()
-                
-        except PermissionError:
-            logger.error(f"Permission denied accessing owned file: {file_path}")
-            return messages.create_message(
-                messages.MessageType.OWNED_FILE_RESPONSE,
-                filename=filename,
-                found=False,
-                error="Permission denied accessing file"
-            )
-        except Exception as e:
-            logger.error(f"Error reading owned file {file_path}: {e}")
-            return messages.create_message(
-                messages.MessageType.OWNED_FILE_RESPONSE,
-                filename=filename,
-                found=False,
-                error=f"Error reading file: {e}"
-            )
-        
-        # Encode as base64
-        data_b64 = base64.b64encode(data).decode('utf-8')
-        
-        return messages.create_message(
-            messages.MessageType.OWNED_FILE_RESPONSE,
-            filename=filename,
-            data=data_b64,
-            found=True,
-            size=len(data)
-        )
-    
-    def _handle_delete_owned_file(self, msg: Dict) -> Dict:
-        """Handle request to delete an owned file."""
-        filename = msg.get("filename")
-        requester_ip = msg.get("requester_ip")
-        requester_port = msg.get("requester_port")
-        
-        if not filename:
-            return messages.create_error_message("Filename required")
-        if not requester_ip or not requester_port:
-            return messages.create_error_message("Requester IP and port required")
-        
-        # Check ownership
-        with self.ownership_lock:
-            if filename not in self.stored_for_others:
-                return messages.create_error_message("File not found")
-            
-            owner_ip, owner_port = self.stored_for_others[filename]
-            if owner_ip != requester_ip or owner_port != requester_port:
-                return messages.create_error_message("Not authorized: You are not the owner")
-        
-        # Delete file from isolated owned storage directory
-        owned_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
-        safe_filename = os.path.basename(filename)
-        file_path = owned_storage_dir / safe_filename
-        
-        try:
-            if file_path.exists():
-                file_path.unlink()
-                # Remove owner directory if empty
-                try:
-                    owned_storage_dir.rmdir()
-                except OSError:
-                    pass  # Directory not empty or doesn't exist
-                
-                with self.ownership_lock:
-                    del self.stored_for_others[filename]
-                logger.info(f"Deleted owned file: {filename} for owner {owner_ip}:{owner_port}")
-                return messages.create_status_message("OK", {"filename": filename})
-            else:
-                return messages.create_error_message("File not found")
-        except Exception as e:
-            logger.error(f"Error deleting owned file: {e}")
-            return messages.create_error_message(f"Failed to delete file: {e}")
     
     def _handle_status(self) -> Dict:
         """Handle status request."""
@@ -1461,268 +1135,6 @@ class Peer:
             logger.info(f"File downloaded and saved to {save_path}")
         
         return file_data
-    
-    def upload_file_to_peer(self, target_peer_ip: str, target_peer_port: int, 
-                           filename: str, file_data: bytes = None, 
-                           file_path: str = None, replication_count: int = 1) -> Dict:
-        """
-        Upload a file to a remote peer (or multiple peers for replication).
-        Only the owner can download it later.
-        
-        Args:
-            target_peer_ip: Primary storage peer IP
-            target_peer_port: Primary storage peer port
-            filename: Name of the file
-            file_data: File data as bytes (if provided)
-            file_path: Path to local file (if file_data not provided)
-            replication_count: Number of peers to replicate to (default: 1)
-            
-        Returns:
-            Dict with success status, storage locations, and any errors
-        """
-        # Get file data
-        if file_data is None:
-            if file_path is None:
-                # Try to get from local storage
-                file_data = self.file_storage.get_file(filename)
-                if file_data is None:
-                    return {"success": False, "error": f"File {filename} not found locally"}
-            else:
-                try:
-                    with open(file_path, 'rb') as f:
-                        file_data = f.read()
-                except Exception as e:
-                    return {"success": False, "error": f"Failed to read file: {e}"}
-        
-        if file_data is None:
-            return {"success": False, "error": "No file data provided"}
-        
-        # Get list of peers for replication
-        storage_peers = [(target_peer_ip, target_peer_port)]
-        
-        if replication_count > 1:
-            # Get additional peers from tracker
-            try:
-                msg = messages.create_message(messages.MessageType.STATUS)
-                response = self._send_to_tracker(msg)
-                if response and response.get("status") == "OK":
-                    peers_data = response.get("data", {}).get("peers", [])
-                    # Filter out self and primary peer
-                    available_peers = [
-                        (p["ip"], p["port"]) 
-                        for p in peers_data 
-                        if (p["ip"], p["port"]) != (self.peer_ip, self.peer_port)
-                        and (p["ip"], p["port"]) != (target_peer_ip, target_peer_port)
-                    ]
-                    # Add up to replication_count - 1 additional peers
-                    storage_peers.extend(available_peers[:replication_count - 1])
-            except Exception as e:
-                logger.warning(f"Failed to get peers for replication: {e}")
-        
-        # Upload to each peer
-        successful_uploads = []
-        errors = []
-        data_b64 = base64.b64encode(file_data).decode('utf-8')
-        
-        for storage_ip, storage_port in storage_peers:
-            try:
-                from client import P2PClient
-                client = P2PClient(storage_ip, storage_port)
-                
-                msg = messages.create_message(
-                    messages.MessageType.UPLOAD_TO_PEER,
-                    filename=filename,
-                    data=data_b64,
-                    owner_ip=self.peer_ip,
-                    owner_port=self.peer_port
-                )
-                
-                response = client._send_request(msg)
-                
-                if response.get("status") == "OK":
-                    successful_uploads.append((storage_ip, storage_port))
-                    # Register with tracker
-                    self._register_owned_file_with_tracker(filename, storage_ip, storage_port)
-                else:
-                    errors.append(f"{storage_ip}:{storage_port}: {response.get('error', 'Unknown error')}")
-                    
-            except Exception as e:
-                errors.append(f"{storage_ip}:{storage_port}: {str(e)}")
-                logger.error(f"Error uploading to {storage_ip}:{storage_port}: {e}")
-        
-            # Update local ownership tracking
-            # Note: We track by filename, not by IP, so IP changes don't affect local tracking
-            if successful_uploads:
-                with self.ownership_lock:
-                    self.owned_files[filename] = successful_uploads
-        
-        if successful_uploads:
-            return {
-                "success": True,
-                "filename": filename,
-                "size": len(file_data),
-                "storage_peers": [f"{ip}:{port}" for ip, port in successful_uploads],
-                "replication_count": len(successful_uploads),
-                "errors": errors if errors else None
-            }
-        else:
-            return {
-                "success": False,
-                "error": f"Failed to upload to any peer. Errors: {'; '.join(errors)}",
-                "filename": filename
-            }
-    
-    def download_owned_file(self, filename: str, save_path: str = None, 
-                            max_retries: int = 3) -> Optional[bytes]:
-        """
-        Download a file that you own from remote storage.
-        Handles peer offline, IP changes, and replication fallback.
-        
-        Args:
-            filename: Name of the owned file
-            save_path: Optional path to save file
-            max_retries: Maximum retry attempts per peer
-            
-        Returns:
-            File data as bytes, or None if failed
-        """
-        # First, query tracker for storage locations
-        storage_peers = []
-        
-        for tracker_retry in range(3):
-            try:
-                msg = messages.create_message(
-                    messages.MessageType.FIND_OWNED_FILE,
-                    filename=filename,
-                    requester_ip=self.peer_ip,
-                    requester_port=self.peer_port
-                )
-                response = self._send_to_tracker(msg)
-                
-                if response and response.get("found"):
-                    peers = response.get("storage_peers", [])
-                    storage_peers = [(p["ip"], p["port"]) for p in peers]
-                    break
-            except Exception as e:
-                logger.warning(f"Failed to query tracker (attempt {tracker_retry + 1}/3): {e}")
-                if tracker_retry < 2:
-                    time.sleep(1)
-        
-        # If tracker doesn't have info, try local ownership tracking
-        if not storage_peers:
-            with self.ownership_lock:
-                storage_peers = self.owned_files.get(filename, [])
-        
-        if not storage_peers:
-            logger.warning(f"Owned file {filename} not found on any peer")
-            return None
-        
-        # Try each storage peer (with retry logic)
-        for storage_ip, storage_port in storage_peers:
-            for attempt in range(max_retries):
-                try:
-                    from client import P2PClient
-                    client = P2PClient(storage_ip, storage_port)
-                    
-                    msg = messages.create_message(
-                        messages.MessageType.GET_OWNED_FILE,
-                        filename=filename,
-                        requester_ip=self.peer_ip,
-                        requester_port=self.peer_port
-                    )
-                    
-                    response = client._send_request(msg)
-                    
-                    if response.get("found") and response.get("data"):
-                        data_b64 = response.get("data")
-                        data = base64.b64decode(data_b64)
-                        
-                        if save_path:
-                            with open(save_path, 'wb') as f:
-                                f.write(data)
-                            logger.info(f"Owned file downloaded and saved to {save_path}")
-                        
-                        logger.info(f"Successfully downloaded owned file {filename} from {storage_ip}:{storage_port}")
-                        return data
-                    elif response.get("error"):
-                        error = response.get("error")
-                        if "Not authorized" in error:
-                            logger.error(f"Authorization failed: {error}")
-                            return None  # Don't retry authorization errors
-                        logger.warning(f"Download failed (attempt {attempt + 1}/{max_retries}): {error}")
-                        
-                except (ConnectionRefusedError, socket.timeout, OSError) as e:
-                    logger.warning(f"Connection failed to {storage_ip}:{storage_port} (attempt {attempt + 1}/{max_retries}): {e}")
-                    
-                    # If connection failed, refresh peer info from tracker
-                    if attempt < max_retries - 1:
-                        try:
-                            # Re-query tracker for updated peer info
-                            msg = messages.create_message(
-                                messages.MessageType.FIND_OWNED_FILE,
-                                filename=filename,
-                                requester_ip=self.peer_ip,
-                                requester_port=self.peer_port
-                            )
-                            refresh_response = self._send_to_tracker(msg)
-                            if refresh_response and refresh_response.get("found"):
-                                updated_peers = refresh_response.get("storage_peers", [])
-                                # Update storage_peers list with fresh info
-                                for p in updated_peers:
-                                    if p["port"] == storage_port:  # Same peer, maybe IP changed
-                                        storage_ip = p["ip"]
-                                        break
-                        except:
-                            pass
-                        time.sleep(1)  # Brief delay before retry
-                        continue
-                        
-                except Exception as e:
-                    logger.error(f"Unexpected error downloading owned file: {e}")
-                    break
-        
-        # If all peers failed, log and return None
-        logger.error(f"Failed to download owned file {filename} from all storage peers")
-        return None
-    
-    def _register_owned_file_with_tracker(self, filename: str, storage_ip: str, storage_port: int):
-        """Register an owned file with the tracker."""
-        try:
-            msg = messages.create_message(
-                messages.MessageType.REGISTER_OWNED_FILE,
-                filename=filename,
-                owner_ip=self.peer_ip,
-                owner_port=self.peer_port,
-                storage_ip=storage_ip,
-                storage_port=storage_port
-            )
-            self._send_to_tracker(msg)
-        except Exception as e:
-            logger.debug(f"Failed to register owned file with tracker: {e}")
-    
-    def _report_owned_files_to_tracker(self):
-        """Report all owned files stored on this peer to tracker (for registry recovery)."""
-        try:
-            with self.ownership_lock:
-                owned_files_list = []
-                for filename, (owner_ip, owner_port) in self.stored_for_others.items():
-                    owned_files_list.append({
-                        "filename": filename,
-                        "owner_ip": owner_ip,
-                        "owner_port": owner_port
-                    })
-            
-            if owned_files_list:
-                msg = messages.create_message(
-                    messages.MessageType.REPORT_OWNED_FILES,
-                    storage_ip=self.peer_ip,
-                    storage_port=self.peer_port,
-                    owned_files=owned_files_list
-                )
-                self._send_to_tracker(msg)
-                logger.info(f"Reported {len(owned_files_list)} owned files to tracker")
-        except Exception as e:
-            logger.debug(f"Failed to report owned files to tracker: {e}")
     
     def _send_to_tracker(self, msg: Dict) -> Optional[Dict]:
         """Send a message to the tracker and return response."""

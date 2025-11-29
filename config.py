@@ -40,9 +40,3 @@ def get_tracker_address() -> Tuple[str, int]:
 def get_peer_port() -> int:
     """Get peer port from environment or use default start."""
     return int(os.getenv("PEER_PORT", DEFAULT_PEER_PORT_START))
-
-
-
-
-
-
