@@ -8,6 +8,8 @@ import threading
 import logging
 import time
 import base64
+import os
+from pathlib import Path
 from typing import Dict, Optional, List, Tuple, Any
 from datetime import datetime
 
@@ -130,6 +132,8 @@ class Peer:
         # Register with tracker
         self._register_with_tracker()
         self._register_existing_files()
+        # Reconstruct owned file metadata from disk
+        self._reconstruct_owned_files_metadata()
         
         # Start heartbeat thread
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
@@ -199,6 +203,36 @@ class Peer:
                 self._register_file_with_tracker(filename)
         except Exception as e:
             logger.debug(f"Error registering existing files: {e}")
+    
+    def _reconstruct_owned_files_metadata(self):
+        """Reconstruct owned file metadata from files on disk after restart."""
+        try:
+            owned_storage_base = Path(config.OWNED_STORAGE_DIR)
+            if not owned_storage_base.exists():
+                return
+            
+            with self.ownership_lock:
+                # Scan owner directories: owned_storage/{owner_ip}_{owner_port}/
+                for owner_dir in owned_storage_base.iterdir():
+                    if owner_dir.is_dir():
+                        # Parse owner from directory name: {owner_ip}_{owner_port}
+                        parts = owner_dir.name.split("_", 1)
+                        if len(parts) == 2:
+                            try:
+                                owner_ip = parts[0]
+                                owner_port = int(parts[1])
+                                
+                                # Scan files in this owner's directory
+                                for file_path in owner_dir.iterdir():
+                                    if file_path.is_file():
+                                        original_filename = file_path.name
+                                        # Reconstruct the metadata
+                                        self.stored_for_others[original_filename] = (owner_ip, owner_port)
+                                        logger.info(f"Reconstructed owned file metadata: {original_filename} for owner {owner_ip}:{owner_port}")
+                            except (ValueError, IndexError) as e:
+                                logger.debug(f"Could not parse owner directory {owner_dir.name}: {e}")
+        except Exception as e:
+            logger.error(f"Error reconstructing owned files metadata: {e}")
     
     def _unregister_from_tracker(self):
         """Unregister this peer from the tracker."""
@@ -537,6 +571,21 @@ class Peer:
         if not filename:
             return messages.create_error_message("Filename required for GET_FILE")
         
+        # Security: Prevent access to owned files through regular GET_FILE
+        # Owned files can only be accessed via GET_OWNED_FILE with ownership verification
+        owned_storage_base = Path(config.OWNED_STORAGE_DIR)
+        if owned_storage_base.exists():
+            for owner_dir in owned_storage_base.iterdir():
+                if owner_dir.is_dir():
+                    file_path = owner_dir / filename
+                    if file_path.exists():
+                        return messages.create_message(
+                            messages.MessageType.FILE_RESPONSE,
+                            filename=filename,
+                            found=False,
+                            error="File is in owned storage and requires ownership verification"
+                        )
+        
         try:
             data = self.file_storage.get_file(filename)
             
@@ -590,16 +639,30 @@ class Peer:
             if not allowed:
                 return messages.create_error_message(error)
             
-            # Store file with special prefix to indicate it's owned by someone else
-            # Use a naming scheme: owned_<owner_ip>_<owner_port>_<filename>
-            owned_filename = f"owned_{owner_ip}_{owner_port}_{filename}"
-            self.file_storage.put_file(owned_filename, data)
+            # Store file in separate owned storage directory, isolated by owner
+            # Structure: owned_storage/{owner_ip}_{owner_port}/filename
+            owned_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
+            owned_storage_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Sanitize filename to prevent directory traversal
+            safe_filename = os.path.basename(filename)
+            if not safe_filename or safe_filename in ('.', '..'):
+                return messages.create_error_message(f"Invalid filename: {filename}")
+            
+            file_path = owned_storage_dir / safe_filename
+            
+            # Write file with restricted permissions (readable only by owner process)
+            import stat
+            with open(file_path, 'wb') as f:
+                f.write(data)
+            # Set file permissions: owner read/write only (0o600)
+            os.chmod(file_path, stat.S_IRUSR | stat.S_IWUSR)
             
             # Record ownership
             with self.ownership_lock:
                 self.stored_for_others[filename] = (owner_ip, owner_port)
             
-            logger.info(f"Stored owned file: {filename} for owner {owner_ip}:{owner_port}")
+            logger.info(f"Stored owned file: {filename} for owner {owner_ip}:{owner_port} in isolated directory")
             
             return messages.create_status_message("OK", {
                 "operation": "UPLOAD_TO_PEER",
@@ -625,19 +688,45 @@ class Peer:
             return messages.create_error_message("Requester IP and port required")
         
         # Check if we have this file stored for the requester
+        # First, try to reconstruct metadata if not found (in case peer restarted)
         with self.ownership_lock:
             if filename not in self.stored_for_others:
+                # Try to find the file in owned storage directories
+                logger.debug(f"File '{filename}' not in metadata, checking owned storage directories...")
+                owned_storage_base = Path(config.OWNED_STORAGE_DIR)
+                if owned_storage_base.exists():
+                    for owner_dir in owned_storage_base.iterdir():
+                        if owner_dir.is_dir():
+                            file_path = owner_dir / filename
+                            if file_path.exists() and file_path.is_file():
+                                # Found it! Parse owner from directory name
+                                parts = owner_dir.name.split("_", 1)
+                                if len(parts) == 2:
+                                    owner_ip = parts[0]
+                                    owner_port = int(parts[1])
+                                    self.stored_for_others[filename] = (owner_ip, owner_port)
+                                    logger.info(f"Reconstructed metadata for {filename} from owned storage")
+                                    break
+        
+        with self.ownership_lock:
+            logger.debug(f"GET_OWNED_FILE request: filename={filename}, requester={requester_ip}:{requester_port}")
+            logger.debug(f"Stored files for others: {list(self.stored_for_others.keys())}")
+            
+            if filename not in self.stored_for_others:
+                logger.warning(f"File '{filename}' not found in stored_for_others. Available files: {list(self.stored_for_others.keys())}")
                 return messages.create_message(
                     messages.MessageType.OWNED_FILE_RESPONSE,
                     filename=filename,
                     found=False,
-                    error="File not found on this peer"
+                    error=f"File not found on this peer. Available owned files: {list(self.stored_for_others.keys())}"
                 )
             
             owner_ip, owner_port = self.stored_for_others[filename]
+            logger.debug(f"File found, owner: {owner_ip}:{owner_port}, requester: {requester_ip}:{requester_port}")
             
             # Verify ownership
-            if owner_ip != requester_ip or owner_port != requester_port:
+            if str(owner_ip) != str(requester_ip) or int(owner_port) != int(requester_port):
+                logger.warning(f"Ownership mismatch: owner={owner_ip}:{owner_port}, requester={requester_ip}:{requester_port}")
                 return messages.create_message(
                     messages.MessageType.OWNED_FILE_RESPONSE,
                     filename=filename,
@@ -645,16 +734,42 @@ class Peer:
                     error="Not authorized: You are not the owner of this file"
                 )
         
-        # Get file
-        owned_filename = f"owned_{owner_ip}_{owner_port}_{filename}"
-        data = self.file_storage.get_file(owned_filename)
+        # Get file from isolated owned storage directory
+        owned_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
+        safe_filename = os.path.basename(filename)
+        file_path = owned_storage_dir / safe_filename
         
-        if data is None:
+        logger.debug(f"Looking for owned file: {file_path}")
+        
+        try:
+            if not file_path.exists():
+                logger.warning(f"Owned file not found at: {file_path}")
+                return messages.create_message(
+                    messages.MessageType.OWNED_FILE_RESPONSE,
+                    filename=filename,
+                    found=False,
+                    error=f"File data not found at: {file_path}"
+                )
+            
+            # Read file with restricted access
+            with open(file_path, 'rb') as f:
+                data = f.read()
+                
+        except PermissionError:
+            logger.error(f"Permission denied accessing owned file: {file_path}")
             return messages.create_message(
                 messages.MessageType.OWNED_FILE_RESPONSE,
                 filename=filename,
                 found=False,
-                error="File data not found"
+                error="Permission denied accessing file"
+            )
+        except Exception as e:
+            logger.error(f"Error reading owned file {file_path}: {e}")
+            return messages.create_message(
+                messages.MessageType.OWNED_FILE_RESPONSE,
+                filename=filename,
+                found=False,
+                error=f"Error reading file: {e}"
             )
         
         # Encode as base64
@@ -688,17 +803,29 @@ class Peer:
             if owner_ip != requester_ip or owner_port != requester_port:
                 return messages.create_error_message("Not authorized: You are not the owner")
         
-        # Delete file
-        owned_filename = f"owned_{owner_ip}_{owner_port}_{filename}"
-        success = self.file_storage.delete_file(owned_filename)
+        # Delete file from isolated owned storage directory
+        owned_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
+        safe_filename = os.path.basename(filename)
+        file_path = owned_storage_dir / safe_filename
         
-        if success:
-            with self.ownership_lock:
-                del self.stored_for_others[filename]
-            logger.info(f"Deleted owned file: {filename} for owner {owner_ip}:{owner_port}")
-            return messages.create_status_message("OK", {"filename": filename})
-        else:
-            return messages.create_error_message("Failed to delete file")
+        try:
+            if file_path.exists():
+                file_path.unlink()
+                # Remove owner directory if empty
+                try:
+                    owned_storage_dir.rmdir()
+                except OSError:
+                    pass  # Directory not empty or doesn't exist
+                
+                with self.ownership_lock:
+                    del self.stored_for_others[filename]
+                logger.info(f"Deleted owned file: {filename} for owner {owner_ip}:{owner_port}")
+                return messages.create_status_message("OK", {"filename": filename})
+            else:
+                return messages.create_error_message("File not found")
+        except Exception as e:
+            logger.error(f"Error deleting owned file: {e}")
+            return messages.create_error_message(f"Failed to delete file: {e}")
     
     def _handle_status(self) -> Dict:
         """Handle status request."""
