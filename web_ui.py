@@ -402,8 +402,9 @@ def list_peers():
             }), 500
         
         if response.get("status") == "OK":
-            peers_data = response.get("data", {})
-            peer_list = peers_data.get("peers", [])
+            # The tracker's create_status_message merges data directly into response
+            # So peers are at response["peers"], not response["data"]["peers"]
+            peer_list = response.get("peers", [])
             
             # Format peer list and exclude current peer
             peers = []
