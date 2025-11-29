@@ -407,20 +407,35 @@ def list_peers():
             
             # Format peer list and exclude current peer
             peers = []
-            current_peer_key = (peer_instance.peer_ip, peer_instance.peer_port)
+            # Ensure port is int for comparison
+            current_peer_ip = str(peer_instance.peer_ip)
+            current_peer_port = int(peer_instance.peer_port)
+            
+            # Debug info
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Current peer: {current_peer_ip}:{current_peer_port}")
+            logger.debug(f"Peers from tracker: {peer_list}")
             
             for peer_info in peer_list:
-                peer_ip = peer_info.get("ip")
-                peer_port = peer_info.get("port")
+                peer_ip = str(peer_info.get("ip", ""))
+                # Handle both int and string ports
+                peer_port_raw = peer_info.get("port", 0)
+                try:
+                    peer_port = int(peer_port_raw)
+                except (ValueError, TypeError):
+                    peer_port = 0
                 
                 # Skip current peer (don't show yourself in the list)
-                if (peer_ip, peer_port) == current_peer_key:
+                # Compare as strings to avoid type issues
+                if str(peer_ip) == str(current_peer_ip) and int(peer_port) == int(current_peer_port):
+                    logger.debug(f"Skipping self: {peer_ip}:{peer_port} (current: {current_peer_ip}:{current_peer_port})")
                     continue
                 
                 peers.append({
                     "ip": peer_ip,
                     "port": peer_port,
-                    "cpu_load": peer_info.get("cpu_load", 0.0),
+                    "cpu_load": float(peer_info.get("cpu_load", 0.0)),
                     "last_update": peer_info.get("last_update")
                 })
             
@@ -429,7 +444,15 @@ def list_peers():
                 "peers": peers,
                 "count": len(peers),
                 "total_peers_on_tracker": len(peer_list),
-                "current_peer": f"{peer_instance.peer_ip}:{peer_instance.peer_port}"
+                "current_peer": f"{current_peer_ip}:{current_peer_port}",
+                "debug_info": {
+                    "current_peer_ip": current_peer_ip,
+                    "current_peer_port": current_peer_port,
+                    "all_peers_from_tracker": [
+                        {"ip": str(p.get("ip", "")), "port": int(p.get("port", 0))} 
+                        for p in peer_list
+                    ]
+                }
             })
         else:
             error_msg = response.get("error", "Unknown error")

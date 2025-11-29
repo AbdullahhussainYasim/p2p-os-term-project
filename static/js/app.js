@@ -784,10 +784,11 @@ async function loadAvailablePeers() {
         const result = await response.json();
         
         if (result.error || !result.success) {
+            const debugInfo = result.debug_info ? `<br><small style="color: #6c757d;">Debug: ${JSON.stringify(result.debug_info)}</small>` : '';
             peersListDiv.innerHTML = `
                 <div style="background: #fff3cd; padding: 10px; border-radius: 4px; border: 1px solid #ffc107;">
                     <strong>⚠ Error:</strong> ${result.error || 'Failed to load peers'}<br>
-                    <small>Make sure the tracker is running and peers are registered.</small>
+                    <small>Make sure the tracker is running and peers are registered.</small>${debugInfo}
                 </div>
             `;
             return;
@@ -796,13 +797,21 @@ async function loadAvailablePeers() {
         const peers = result.peers || [];
         
         if (peers.length === 0) {
+            const debugInfo = result.debug_info ? `
+                <div style="margin-top: 10px; padding: 10px; background: #e9ecef; border-radius: 4px; font-size: 0.85em;">
+                    <strong>Debug Info:</strong><br>
+                    Current Peer: ${result.current_peer || 'Unknown'}<br>
+                    Total Peers on Tracker: ${result.total_peers_on_tracker || 0}<br>
+                    All Peers: ${result.debug_info ? JSON.stringify(result.debug_info.all_peers_from_tracker) : 'N/A'}
+                </div>
+            ` : '';
             peersListDiv.innerHTML = `
                 <div style="background: #f8f9fa; padding: 15px; border-radius: 4px; border: 1px solid #ddd;">
                     <strong>No other peers available</strong><br>
                     <small style="color: #6c757d;">
                         Make sure other peers are running and connected to the same tracker.
                         You can also manually enter a peer's IP and port below.
-                    </small>
+                    </small>${debugInfo}
                 </div>
             `;
             return;
