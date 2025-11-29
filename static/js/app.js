@@ -91,6 +91,8 @@ function showTab(tabName) {
         loadMemoryKeys();
     } else if (tabName === 'files') {
         loadFiles();
+        populateRemoteUploadFiles();
+        loadOwnedFiles();
     } else if (tabName === 'processes') {
         loadProcessTree();
     } else if (tabName === 'os') {
@@ -475,6 +477,119 @@ function setupFormHandlers() {
         }
     });
     
+    // Remote file upload form (owned storage)
+    document.getElementById('file-upload-remote-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const filename = document.getElementById('upload-remote-filename').value;
+        const peerIp = document.getElementById('upload-remote-ip').value;
+        const peerPort = document.getElementById('upload-remote-port').value;
+        const replication = parseInt(document.getElementById('upload-remote-replication').value) || 1;
+        const statusDiv = document.getElementById('file-upload-remote-status');
+        
+        if (!filename || !peerIp || !peerPort) {
+            showToast('Please fill in all required fields', 'error');
+            return;
+        }
+        
+        statusDiv.innerHTML = '<p style="color: #6c757d;">Uploading to remote peer(s)...</p>';
+        
+        try {
+            const response = await fetch('/api/file/upload-remote', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filename: filename,
+                    target_peer_ip: peerIp,
+                    target_peer_port: parseInt(peerPort),
+                    replication_count: replication
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.error || !result.success) {
+                statusDiv.innerHTML = `
+                    <div class="result-box error">
+                        <strong>✗ Upload Failed</strong><br>
+                        ${result.error || 'Unknown error'}
+                    </div>
+                `;
+                showToast('Upload failed: ' + (result.error || 'Unknown error'), 'error');
+            } else {
+                const replicationInfo = result.replication_count > 1 
+                    ? `<br>Replicated to ${result.replication_count} peer(s) for redundancy`
+                    : '';
+                const errorsInfo = result.errors && result.errors.length > 0
+                    ? `<br><small style="color: #ef4444;">Some replications failed: ${result.errors.join('; ')}</small>`
+                    : '';
+                statusDiv.innerHTML = `
+                    <div class="result-box success">
+                        <strong>✓ File uploaded successfully!</strong><br>
+                        Filename: ${result.filename}<br>
+                        Size: ${(result.size / 1024).toFixed(2)} KB<br>
+                        Stored on: ${result.storage_peers.join(', ')}${replicationInfo}${errorsInfo}
+                    </div>
+                `;
+                showToast('File uploaded to remote peer(s) successfully!', 'success');
+                loadOwnedFiles(); // Refresh owned files list
+            }
+        } catch (error) {
+            statusDiv.innerHTML = `<div class="result-box error"><strong>Error:</strong> ${error.message}</div>`;
+            showToast('Error: ' + error.message, 'error');
+        }
+    });
+    
+    // Download owned file form
+    document.getElementById('file-download-owned-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const filename = document.getElementById('download-owned-filename').value;
+        const statusDiv = document.getElementById('file-download-owned-status');
+        
+        if (!filename) {
+            showToast('Please select a file', 'error');
+            return;
+        }
+        
+        statusDiv.innerHTML = '<p style="color: #6c757d;">Downloading owned file from remote storage...</p>';
+        
+        try {
+            const response = await fetch('/api/file/download-owned', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename })
+            });
+            
+            const result = await response.json();
+            
+            if (result.error || !result.success) {
+                statusDiv.innerHTML = `
+                    <div class="result-box error">
+                        <strong>✗ Download Failed</strong><br>
+                        ${result.error || 'Unknown error'}<br>
+                        <small>This may happen if all storage peers are offline. Try again later or re-upload the file.</small>
+                    </div>
+                `;
+                showToast('Download failed: ' + (result.error || 'Unknown error'), 'error');
+            } else {
+                statusDiv.innerHTML = `
+                    <div class="result-box success">
+                        <strong>✓ File downloaded successfully!</strong><br>
+                        Filename: ${result.filename}<br>
+                        Size: ${(result.size / 1024).toFixed(2)} KB<br>
+                        File has been saved to local storage.
+                    </div>
+                `;
+                showToast('Owned file downloaded successfully!', 'success');
+                loadFiles(); // Refresh file list
+            }
+        } catch (error) {
+            statusDiv.innerHTML = `<div class="result-box error"><strong>Error:</strong> ${error.message}</div>`;
+            showToast('Error: ' + error.message, 'error');
+        }
+    });
+    
     // Scheduler form
     document.getElementById('scheduler-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -655,6 +770,113 @@ async function deleteFile(filename) {
         }
     } catch (error) {
         showToast('Error: ' + error.message, 'error');
+    }
+}
+
+// Load available peers from tracker
+async function loadAvailablePeers() {
+    const peersListDiv = document.getElementById('available-peers-list');
+    peersListDiv.innerHTML = '<p style="color: #6c757d;">Loading peers...</p>';
+    
+    try {
+        const response = await fetch('/api/peers/list');
+        const result = await response.json();
+        
+        if (result.error || !result.success) {
+            peersListDiv.innerHTML = `<p style="color: #ef4444;">Error: ${result.error || 'Failed to load peers'}</p>`;
+            return;
+        }
+        
+        const peers = result.peers || [];
+        
+        if (peers.length === 0) {
+            peersListDiv.innerHTML = '<p style="color: #6c757d;">No other peers available on the network.</p>';
+            return;
+        }
+        
+        peersListDiv.innerHTML = `
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 4px; margin-bottom: 10px;">
+                <strong>Available Peers (${peers.length}):</strong>
+                <div style="margin-top: 10px;">
+                    ${peers.map(peer => `
+                        <div style="padding: 8px; margin: 5px 0; background: white; border-radius: 4px; cursor: pointer; border: 1px solid #ddd;"
+                             onclick="selectPeer('${peer.ip}', ${peer.port})"
+                             onmouseover="this.style.borderColor='#007bff'"
+                             onmouseout="this.style.borderColor='#ddd'">
+                            <strong>${peer.ip}:${peer.port}</strong>
+                            <span style="color: #6c757d; font-size: 0.9em;"> (Load: ${peer.cpu_load.toFixed(2)})</span>
+                        </div>
+                    `).join('')}
+                </div>
+                <p style="font-size: 0.85em; color: #6c757d; margin-top: 10px;">
+                    Click on a peer to auto-fill the IP and port fields.
+                </p>
+            </div>
+        `;
+    } catch (error) {
+        peersListDiv.innerHTML = `<p style="color: #ef4444;">Error: ${error.message}</p>`;
+    }
+}
+
+// Select a peer (fill in IP and port fields)
+function selectPeer(ip, port) {
+    document.getElementById('upload-remote-ip').value = ip;
+    document.getElementById('upload-remote-port').value = port;
+    showToast(`Selected peer: ${ip}:${port}`, 'success');
+}
+
+// Populate file dropdown for remote upload
+function populateRemoteUploadFiles() {
+    const fileSelect = document.getElementById('upload-remote-filename');
+    
+    // Clear existing options except the first one
+    fileSelect.innerHTML = '<option value="">-- Select a file --</option>';
+    
+    // Load files and populate dropdown
+    fetch('/api/file/list')
+        .then(response => response.json())
+        .then(data => {
+            if (!data.error && data.files && data.files.length > 0) {
+                data.files.forEach(filename => {
+                    const option = document.createElement('option');
+                    option.value = filename;
+                    option.textContent = filename;
+                    fileSelect.appendChild(option);
+                });
+            }
+        })
+        .catch(error => {
+            console.error('Error loading files for dropdown:', error);
+        });
+}
+
+// Load owned files list
+async function loadOwnedFiles() {
+    const fileSelect = document.getElementById('download-owned-filename');
+    
+    // Clear existing options except the first one
+    fileSelect.innerHTML = '<option value="">-- Select an owned file --</option>';
+    
+    try {
+        const response = await fetch('/api/file/list-owned');
+        const data = await response.json();
+        
+        if (!data.error && data.owned_files && data.owned_files.length > 0) {
+            data.owned_files.forEach(filename => {
+                const option = document.createElement('option');
+                option.value = filename;
+                option.textContent = filename;
+                fileSelect.appendChild(option);
+            });
+        } else {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = '-- No owned files --';
+            option.disabled = true;
+            fileSelect.appendChild(option);
+        }
+    } catch (error) {
+        console.error('Error loading owned files:', error);
     }
 }
 

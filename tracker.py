@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Central tracker node for peer discovery and load balancing.
 """
@@ -62,6 +63,12 @@ class Tracker:
         self.port = port or config.DEFAULT_TRACKER_PORT
         self.peers: Dict[Tuple[str, int], PeerInfo] = {}  # (ip, port) -> PeerInfo
         self.file_registry: Dict[str, List[Tuple[str, int]]] = {}  # filename -> [(ip, port), ...]
+        
+        # Owned file tracking: filename -> (owner_peer, [(storage_peer_ip, storage_peer_port), ...])
+        # owner_peer is (ip, port) tuple
+        # storage_peers is list of (ip, port) tuples where file is stored
+        self.owned_file_registry: Dict[str, Tuple[Tuple[str, int], List[Tuple[str, int]]]] = {}
+        
         self.lock = threading.Lock()
         self.running = False
         self.server_socket: Optional[socket.socket] = None
@@ -133,12 +140,14 @@ class Tracker:
                             self.file_registry[filename].remove(peer_key)
                         if not self.file_registry[filename]:
                             del self.file_registry[filename]
-                    # Remove peer from file registry
-                    for filename in list(self.file_registry.keys()):
-                        if peer_key in self.file_registry[filename]:
-                            self.file_registry[filename].remove(peer_key)
-                        if not self.file_registry[filename]:
-                            del self.file_registry[filename]
+                    # Remove peer from owned file storage (but keep ownership info)
+                    for filename in list(self.owned_file_registry.keys()):
+                        owner_peer, storage_peers = self.owned_file_registry[filename]
+                        if peer_key in storage_peers:
+                            storage_peers.remove(peer_key)
+                            # If no storage peers left, keep entry but with empty list
+                            # Owner can re-upload or system can migrate
+                            self.owned_file_registry[filename] = (owner_peer, storage_peers)
     
     def _handle_client(self, client_socket: socket.socket, address: Tuple[str, int]):
         """Handle a client connection."""
@@ -183,6 +192,10 @@ class Tracker:
             return self._handle_register_file(msg, address)
         elif msg_type == messages.MessageType.FIND_FILE:
             return self._handle_find_file(msg)
+        elif msg_type == messages.MessageType.REGISTER_OWNED_FILE:
+            return self._handle_register_owned_file(msg, address)
+        elif msg_type == messages.MessageType.FIND_OWNED_FILE:
+            return self._handle_find_owned_file(msg, address)
         elif msg_type == messages.MessageType.STATUS:
             return self._handle_status()
         else:
@@ -323,6 +336,106 @@ class Tracker:
             filename=filename,
             peers=alive_peers,
             found=len(alive_peers) > 0
+        )
+    
+    def _handle_register_owned_file(self, msg: Dict, address: Tuple[str, int]) -> Dict:
+        """
+        Handle owned file registration.
+        Registers that a file is owned by owner_peer and stored on storage_peer.
+        """
+        filename = msg.get("filename")
+        owner_ip = msg.get("owner_ip")
+        owner_port = msg.get("owner_port")
+        storage_ip = msg.get("storage_ip", address[0])
+        storage_port = msg.get("storage_port")
+        
+        if not filename:
+            return messages.create_error_message("Filename required")
+        if not owner_ip or not owner_port:
+            return messages.create_error_message("Owner IP and port required")
+        if not storage_port:
+            return messages.create_error_message("Storage port required")
+        
+        owner_key = (owner_ip, owner_port)
+        storage_key = (storage_ip, storage_port)
+        
+        with self.lock:
+            # Verify both peers are registered
+            if owner_key not in self.peers:
+                return messages.create_error_message("Owner peer not registered")
+            if storage_key not in self.peers:
+                return messages.create_error_message("Storage peer not registered")
+            
+            # Register or update owned file entry
+            if filename in self.owned_file_registry:
+                existing_owner, existing_storage = self.owned_file_registry[filename]
+                # Verify ownership (only owner can update)
+                if existing_owner != owner_key:
+                    return messages.create_error_message("File already owned by another peer")
+                # Add storage peer if not already present
+                if storage_key not in existing_storage:
+                    existing_storage.append(storage_key)
+            else:
+                # New owned file
+                self.owned_file_registry[filename] = (owner_key, [storage_key])
+            
+            logger.info(f"Owned file registered: {filename} owned by {owner_ip}:{owner_port}, stored on {storage_ip}:{storage_port}")
+        
+        return messages.create_status_message("OK", {"filename": filename})
+    
+    def _handle_find_owned_file(self, msg: Dict, address: Tuple[str, int]) -> Dict:
+        """
+        Handle owned file lookup.
+        Returns storage locations if requester is the owner.
+        """
+        filename = msg.get("filename")
+        requester_ip = msg.get("requester_ip", address[0])
+        requester_port = msg.get("requester_port")
+        
+        if not filename:
+            return messages.create_error_message("Filename required")
+        if not requester_port:
+            return messages.create_error_message("Requester port required")
+        
+        requester_key = (requester_ip, requester_port)
+        
+        with self.lock:
+            if filename not in self.owned_file_registry:
+                return messages.create_message(
+                    messages.MessageType.OWNED_FILE_RESPONSE,
+                    filename=filename,
+                    found=False,
+                    error="File not found"
+                )
+            
+            owner_key, storage_peers = self.owned_file_registry[filename]
+            
+            # Verify ownership
+            if owner_key != requester_key:
+                return messages.create_message(
+                    messages.MessageType.OWNED_FILE_RESPONSE,
+                    filename=filename,
+                    found=False,
+                    error="Not authorized: You are not the owner of this file"
+                )
+            
+            # Filter to only alive storage peers
+            alive_storage_peers = []
+            for storage_key in storage_peers:
+                if storage_key in self.peers and self.peers[storage_key].is_alive(config.PEER_TIMEOUT):
+                    alive_storage_peers.append({"ip": storage_key[0], "port": storage_key[1]})
+            
+            # Update registry if some peers are dead
+            if len(alive_storage_peers) < len(storage_peers):
+                self.owned_file_registry[filename] = (owner_key, [(p["ip"], p["port"]) for p in alive_storage_peers])
+        
+        return messages.create_message(
+            messages.MessageType.OWNED_FILE_RESPONSE,
+            filename=filename,
+            found=len(alive_storage_peers) > 0,
+            owner_ip=owner_key[0],
+            owner_port=owner_key[1],
+            storage_peers=alive_storage_peers
         )
     
     def _receive_message(self, sock: socket.socket) -> Optional[bytes]:

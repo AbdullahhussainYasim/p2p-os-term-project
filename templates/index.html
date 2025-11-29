@@ -251,6 +251,66 @@
             </div>
 
             <div class="form-section" style="margin-top: 30px;">
+                <h3>Upload File to Remote Peer (Owned Storage)</h3>
+                <p style="font-size: 0.9em; color: #6c757d; margin-bottom: 15px;">
+                    Upload a file to another peer's storage. Only you (the owner) can download it later. 
+                    The system handles peer offline, IP changes, and can replicate to multiple peers for redundancy.
+                </p>
+                <form id="file-upload-remote-form" class="inline-form">
+                    <div class="form-group">
+                        <label>Select File (from local storage):</label>
+                        <select id="upload-remote-filename" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <option value="">-- Select a file --</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Target Peer IP:</label>
+                        <input type="text" id="upload-remote-ip" placeholder="e.g., 192.168.1.100" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Target Peer Port:</label>
+                        <input type="number" id="upload-remote-port" placeholder="e.g., 9000" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Replication Count:</label>
+                        <input type="number" id="upload-remote-replication" value="1" min="1" max="5" 
+                               title="Number of peers to store the file on (for redundancy)">
+                        <small style="color: #6c757d;">(1 = single peer, 2+ = replicated for redundancy)</small>
+                    </div>
+                    <div class="form-group">
+                        <button type="button" onclick="loadAvailablePeers()" class="btn btn-secondary" style="width: 100%;">
+                            <i class="fas fa-list"></i> Load Available Peers
+                        </button>
+                    </div>
+                    <div id="available-peers-list" style="margin-top: 10px;"></div>
+                    <button type="submit" class="btn btn-primary" style="margin-top: 15px;">
+                        <i class="fas fa-cloud-upload-alt"></i> Upload to Remote Peer
+                    </button>
+                </form>
+                <div id="file-upload-remote-status" style="margin-top: 15px;"></div>
+            </div>
+
+            <div class="form-section" style="margin-top: 30px;">
+                <h3>Download Owned File</h3>
+                <p style="font-size: 0.9em; color: #6c757d; margin-bottom: 15px;">
+                    Download a file that you own from remote storage. The system automatically handles 
+                    peer offline, IP changes, and tries multiple storage locations.
+                </p>
+                <form id="file-download-owned-form" class="inline-form">
+                    <div class="form-group">
+                        <label>Select Owned File:</label>
+                        <select id="download-owned-filename" required style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <option value="">-- Select an owned file --</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-download"></i> Download Owned File
+                    </button>
+                </form>
+                <div id="file-download-owned-status" style="margin-top: 15px;"></div>
+            </div>
+
+            <div class="form-section" style="margin-top: 30px;">
                 <h3>Download from Network</h3>
                 <form id="file-download-network-form" class="inline-form">
                     <div class="form-group">

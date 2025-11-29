@@ -285,6 +285,144 @@ def download_from_network():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/file/upload-remote', methods=['POST'])
+def upload_file_to_remote():
+    """Upload a file to a remote peer (owned file storage)."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        data = request.json
+        filename = data.get("filename")
+        target_peer_ip = data.get("target_peer_ip")
+        target_peer_port = data.get("target_peer_port")
+        replication_count = data.get("replication_count", 1)
+        
+        if not filename:
+            return jsonify({"error": "filename required"}), 400
+        if not target_peer_ip or not target_peer_port:
+            return jsonify({"error": "target_peer_ip and target_peer_port required"}), 400
+        
+        # Get file from local storage
+        file_data = peer_instance.file_storage.get_file(filename)
+        if file_data is None:
+            return jsonify({"error": f"File {filename} not found locally"}), 404
+        
+        # Upload to remote peer
+        result = peer_instance.upload_file_to_peer(
+            target_peer_ip, 
+            int(target_peer_port), 
+            filename, 
+            file_data=file_data,
+            replication_count=replication_count
+        )
+        
+        if result.get("success"):
+            return jsonify(result)
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/file/download-owned', methods=['POST'])
+def download_owned_file():
+    """Download an owned file from remote storage."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        data = request.json
+        filename = data.get("filename")
+        
+        if not filename:
+            return jsonify({"error": "filename required"}), 400
+        
+        # Download owned file
+        file_data = peer_instance.download_owned_file(filename)
+        
+        if file_data is None:
+            return jsonify({"error": "File not found or failed to download"}), 404
+        
+        # Save to local storage
+        success = peer_instance.put_file(filename, file_data)
+        
+        if success:
+            return jsonify({
+                "success": True,
+                "filename": filename,
+                "size": len(file_data)
+            })
+        else:
+            return jsonify({"error": "Failed to save file"}), 500
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/file/list-owned', methods=['GET'])
+def list_owned_files():
+    """List files owned by this peer."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        with peer_instance.ownership_lock:
+            owned_files = list(peer_instance.owned_files.keys())
+        
+        return jsonify({
+            "success": True,
+            "owned_files": owned_files,
+            "count": len(owned_files)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/peers/list', methods=['GET'])
+def list_peers():
+    """Get list of available peers from tracker."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        # Query tracker for peer list
+        msg = messages.create_message(messages.MessageType.STATUS)
+        response = peer_instance._send_to_tracker(msg)
+        
+        if response and response.get("status") == "OK":
+            peers_data = response.get("data", {})
+            peer_list = peers_data.get("peers", [])
+            
+            # Format peer list
+            peers = []
+            for peer_info in peer_list:
+                peers.append({
+                    "ip": peer_info.get("ip"),
+                    "port": peer_info.get("port"),
+                    "cpu_load": peer_info.get("cpu_load", 0.0),
+                    "last_update": peer_info.get("last_update")
+                })
+            
+            return jsonify({
+                "success": True,
+                "peers": peers,
+                "count": len(peers)
+            })
+        else:
+            return jsonify({"error": "Failed to get peer list from tracker"}), 500
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/history', methods=['GET'])
 def get_history():
     """Get task history."""
