@@ -216,10 +216,11 @@ class Peer:
                 for owner_dir in owned_storage_base.iterdir():
                     if owner_dir.is_dir():
                         # Parse owner from directory name: {owner_ip}_{owner_port}
+                        # Note: IP might have changed, but port is stable identifier
                         parts = owner_dir.name.split("_", 1)
                         if len(parts) == 2:
                             try:
-                                owner_ip = parts[0]
+                                owner_ip = parts[0]  # May be old IP
                                 owner_port = int(parts[1])
                                 
                                 # Scan files in this owner's directory
@@ -227,8 +228,9 @@ class Peer:
                                     if file_path.is_file():
                                         original_filename = file_path.name
                                         # Reconstruct the metadata
+                                        # Note: IP will be updated when owner requests file with new IP
                                         self.stored_for_others[original_filename] = (owner_ip, owner_port)
-                                        logger.info(f"Reconstructed owned file metadata: {original_filename} for owner {owner_ip}:{owner_port}")
+                                        logger.info(f"Reconstructed owned file metadata: {original_filename} for owner {owner_ip}:{owner_port} (port {owner_port})")
                             except (ValueError, IndexError) as e:
                                 logger.debug(f"Could not parse owner directory {owner_dir.name}: {e}")
         except Exception as e:
@@ -724,20 +726,56 @@ class Peer:
             owner_ip, owner_port = self.stored_for_others[filename]
             logger.debug(f"File found, owner: {owner_ip}:{owner_port}, requester: {requester_ip}:{requester_port}")
             
-            # Verify ownership
-            if str(owner_ip) != str(requester_ip) or int(owner_port) != int(requester_port):
-                logger.warning(f"Ownership mismatch: owner={owner_ip}:{owner_port}, requester={requester_ip}:{requester_port}")
+            # Verify ownership - use port as primary identifier (handles IP changes)
+            if int(owner_port) != int(requester_port):
+                logger.warning(f"Port mismatch: owner port={owner_port}, requester port={requester_port}")
                 return messages.create_message(
                     messages.MessageType.OWNED_FILE_RESPONSE,
                     filename=filename,
                     found=False,
-                    error="Not authorized: You are not the owner of this file"
+                    error="Not authorized: Port mismatch - you are not the owner of this file"
                 )
+            
+            # If IP changed but port matches, update metadata and potentially rename directory
+            if str(owner_ip) != str(requester_ip):
+                logger.info(f"IP changed for owner: {owner_ip}:{owner_port} -> {requester_ip}:{requester_port}")
+                
+                # Update metadata
+                self.stored_for_others[filename] = (requester_ip, requester_port)
+                
+                # Check if we need to rename the storage directory
+                old_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
+                new_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{requester_ip}_{requester_port}"
+                
+                if old_storage_dir.exists() and not new_storage_dir.exists():
+                    try:
+                        # Move the entire directory to new name
+                        old_storage_dir.rename(new_storage_dir)
+                        logger.info(f"Renamed owned storage directory: {old_storage_dir} -> {new_storage_dir}")
+                    except Exception as e:
+                        logger.warning(f"Could not rename directory (will use old path): {e}")
+                        # Continue with old path - file should still be accessible
+                
+                owner_ip = requester_ip  # Use new IP for file path
         
         # Get file from isolated owned storage directory
+        # Try new IP first, fallback to old IP if directory rename failed
         owned_storage_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
         safe_filename = os.path.basename(filename)
         file_path = owned_storage_dir / safe_filename
+        
+        # If file not found, try old IP directory (in case rename didn't happen)
+        if not file_path.exists():
+            # Try to find directory by port only
+            owned_storage_base = Path(config.OWNED_STORAGE_DIR)
+            if owned_storage_base.exists():
+                for owner_dir in owned_storage_base.iterdir():
+                    if owner_dir.is_dir() and owner_dir.name.endswith(f"_{owner_port}"):
+                        alt_file_path = owner_dir / safe_filename
+                        if alt_file_path.exists():
+                            file_path = alt_file_path
+                            logger.info(f"Found file in alternative directory: {file_path}")
+                            break
         
         logger.debug(f"Looking for owned file: {file_path}")
         
@@ -1504,10 +1542,11 @@ class Peer:
                 errors.append(f"{storage_ip}:{storage_port}: {str(e)}")
                 logger.error(f"Error uploading to {storage_ip}:{storage_port}: {e}")
         
-        # Update local ownership tracking
-        if successful_uploads:
-            with self.ownership_lock:
-                self.owned_files[filename] = successful_uploads
+            # Update local ownership tracking
+            # Note: We track by filename, not by IP, so IP changes don't affect local tracking
+            if successful_uploads:
+                with self.ownership_lock:
+                    self.owned_files[filename] = successful_uploads
         
         if successful_uploads:
             return {

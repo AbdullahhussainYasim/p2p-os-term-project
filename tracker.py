@@ -213,6 +213,29 @@ class Tracker:
         peer_key = (ip, port)
         
         with self.lock:
+            # Check if this port was registered with a different IP (IP changed)
+            old_peer_key = None
+            for existing_key in list(self.peers.keys()):
+                if existing_key[1] == port and existing_key[0] != ip:
+                    old_peer_key = existing_key
+                    break
+            
+            if old_peer_key:
+                # IP changed but port is same - update ownership records
+                logger.info(f"Peer IP changed: {old_peer_key[0]}:{port} -> {ip}:{port}")
+                
+                # Update owned file registry: change owner IP for all files owned by old IP:port
+                for filename in list(self.owned_file_registry.keys()):
+                    owner_key, storage_peers = self.owned_file_registry[filename]
+                    if owner_key == old_peer_key:
+                        # Update owner to new IP
+                        new_owner_key = (ip, port)
+                        self.owned_file_registry[filename] = (new_owner_key, storage_peers)
+                        logger.info(f"Updated ownership for {filename}: {old_peer_key} -> {new_owner_key}")
+                
+                # Remove old peer entry
+                del self.peers[old_peer_key]
+            
             if peer_key in self.peers:
                 # Update existing peer
                 self.peers[peer_key].update_load(cpu_load)
@@ -387,6 +410,7 @@ class Tracker:
         """
         Handle owned file lookup.
         Returns storage locations if requester is the owner.
+        Handles IP changes by checking port match.
         """
         filename = msg.get("filename")
         requester_ip = msg.get("requester_ip", address[0])
@@ -410,14 +434,23 @@ class Tracker:
             
             owner_key, storage_peers = self.owned_file_registry[filename]
             
-            # Verify ownership
-            if owner_key != requester_key:
+            # Verify ownership - allow if port matches (handles IP changes)
+            # Port is more stable than IP, so we use it as primary identifier
+            if owner_key[1] != requester_port:
                 return messages.create_message(
                     messages.MessageType.OWNED_FILE_RESPONSE,
                     filename=filename,
                     found=False,
-                    error="Not authorized: You are not the owner of this file"
+                    error="Not authorized: Port mismatch - you are not the owner of this file"
                 )
+            
+            # If IP changed but port matches, update the ownership record
+            if owner_key[0] != requester_ip:
+                logger.info(f"IP changed for owner: {owner_key[0]}:{owner_key[1]} -> {requester_ip}:{requester_port}")
+                # Update ownership record to new IP
+                new_owner_key = (requester_ip, requester_port)
+                self.owned_file_registry[filename] = (new_owner_key, storage_peers)
+                owner_key = new_owner_key
             
             # Filter to only alive storage peers
             alive_storage_peers = []
