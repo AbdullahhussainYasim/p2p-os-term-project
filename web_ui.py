@@ -555,19 +555,31 @@ def list_peers():
         msg = messages.create_message(messages.MessageType.STATUS)
         response = peer_instance._send_to_tracker(msg)
         
-        if response and "data" in response:
-            peers_data = response["data"].get("peers", [])
+        if response:
+            # The tracker returns peers directly in the response, not in a "data" key
+            peers_data = response.get("peers", [])
+            
             # Filter out current peer
-            current_peer = {"ip": peer_instance.peer_ip, "port": peer_instance.peer_port}
-            other_peers = [
-                {"ip": p.get("ip"), "port": p.get("port")}
-                for p in peers_data
-                if p.get("ip") != current_peer["ip"] or p.get("port") != current_peer["port"]
-            ]
+            current_peer_ip = str(peer_instance.peer_ip)
+            current_peer_port = int(peer_instance.peer_port)
+            
+            other_peers = []
+            for p in peers_data:
+                peer_ip = str(p.get("ip", ""))
+                peer_port = int(p.get("port", 0))
+                # Only include if it's a different peer
+                if peer_ip != current_peer_ip or peer_port != current_peer_port:
+                    other_peers.append({
+                        "ip": peer_ip,
+                        "port": peer_port
+                    })
+            
             return jsonify({"peers": other_peers})
         else:
             return jsonify({"peers": []})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e), "peers": []}), 500
 
 
