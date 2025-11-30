@@ -4,7 +4,7 @@
 A lightweight, peer-to-peer (P2P) distributed system in Python that simulates an operating system's ability to share CPU, memory, and disk resources across a network.
 
 ![Python Version](https://img.shields.io/badge/python-3.x-blue.svg)
-![License](https://img.ios/badge/license-MIT-green.svg)
+<!-- ![License](https://img.ios/badge/license-MIT-green.svg) -->
 
 ---
 
