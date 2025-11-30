@@ -268,6 +268,72 @@
                 <div id="file-download-status" style="margin-top: 15px;"></div>
             </div>
 
+            <div class="form-section" style="margin-top: 30px;">
+                <h3>Upload File to Remote Peer (Owned Storage)</h3>
+                <p class="description-text" style="margin-bottom: 15px; color: #6c757d;">
+                    Upload a file to another peer's storage. Only you (the owner) can download it later. 
+                    The file will be encrypted and stored securely on the target peer.
+                </p>
+                <form id="file-upload-remote-form">
+                    <div class="form-group">
+                        <label>Select File from Local Storage:</label>
+                        <select id="remote-upload-filename" class="form-control" required>
+                            <option value="">-- Select a file --</option>
+                        </select>
+                        <button type="button" onclick="populateRemoteUploadFiles()" class="btn btn-secondary" style="margin-top: 5px;">
+                            <i class="fas fa-sync"></i> Refresh File List
+                        </button>
+                    </div>
+                    <div class="form-group">
+                        <label>Target Peer IP:</label>
+                        <input type="text" id="target-peer-ip" class="form-control" placeholder="e.g., 192.168.1.100" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Target Peer Port:</label>
+                        <input type="number" id="target-peer-port" class="form-control" placeholder="e.g., 9000" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Available Peers:</label>
+                        <select id="available-peers" class="form-control" onchange="selectPeer()">
+                            <option value="">-- Select a peer --</option>
+                        </select>
+                        <button type="button" onclick="loadAvailablePeers()" class="btn btn-secondary" style="margin-top: 5px;">
+                            <i class="fas fa-sync"></i> Load Available Peers
+                        </button>
+                    </div>
+                    <div class="form-group">
+                        <label>Replication Count:</label>
+                        <input type="number" id="replication-count" class="form-control" value="1" min="1" max="3" title="Number of peers to store the file on (for redundancy)">
+                        <small style="color: #6c757d;">Store file on multiple peers for redundancy (recommended: 2-3)</small>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-cloud-upload-alt"></i> Upload to Remote Peer
+                    </button>
+                </form>
+                <div id="remote-upload-status" style="margin-top: 15px;"></div>
+            </div>
+
+            <div class="form-section" style="margin-top: 30px;">
+                <h3>Download Owned File</h3>
+                <p class="description-text" style="margin-bottom: 15px; color: #6c757d;">
+                    Download a file that you previously uploaded to a remote peer. Only files you own can be downloaded.
+                </p>
+                <form id="file-download-owned-form" class="inline-form">
+                    <div class="form-group">
+                        <select id="owned-file-select" class="form-control" required>
+                            <option value="">-- Select an owned file --</option>
+                        </select>
+                        <button type="button" onclick="loadOwnedFiles()" class="btn btn-secondary" style="margin-top: 5px;">
+                            <i class="fas fa-sync"></i> Refresh Owned Files
+                        </button>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-download"></i> Download Owned File
+                    </button>
+                </form>
+                <div id="owned-download-status" style="margin-top: 15px;"></div>
+            </div>
+
             <div class="section">
                 <h3>Stored Files</h3>
                 <button onclick="loadFiles()" class="btn btn-secondary">
