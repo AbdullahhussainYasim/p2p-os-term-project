@@ -3,7 +3,9 @@ Web UI for P2P Resource Sharing System.
 Flask-based web interface for interacting with peers and tracker.
 """
 
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, send_file
+from werkzeug.utils import secure_filename
+import io
 import threading
 import socket
 import json
@@ -459,25 +461,34 @@ def upload_file_to_remote_peer():
         return jsonify({"error": "Peer not initialized"}), 500
     
     try:
-        data = request.json
-        filename = data.get("filename")
-        target_ip = data.get("target_ip")
-        target_port = data.get("target_port")
-        replication = int(data.get("replication", 1))
+        # Check if file was uploaded
+        if 'file' not in request.files:
+            return jsonify({"error": "No file provided"}), 400
         
-        if not filename or not target_ip or not target_port:
-            return jsonify({"error": "filename, target_ip, and target_port required"}), 400
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
         
-        # Get file from local storage
-        file_data = peer_instance.file_storage.get_file(filename)
+        # Get target peer info from form data
+        target_ip = request.form.get("target_ip")
+        target_port = request.form.get("target_port")
+        replication = int(request.form.get("replication", 1))
+        
+        if not target_ip or not target_port:
+            return jsonify({"error": "target_ip and target_port required"}), 400
+        
+        # Get file data
+        filename = secure_filename(file.filename)
+        file_data = file.read()
+        
         if not file_data:
-            return jsonify({"error": f"File {filename} not found in local storage"}), 404
+            return jsonify({"error": "File is empty"}), 400
         
         # Upload to remote peer
         result = peer_instance.upload_file_to_peer(
             filename=filename,
             file_data=file_data,
-            target_peers=[(target_ip, target_port)],
+            target_peers=[(target_ip, int(target_port))],
             replication=replication
         )
         
@@ -497,7 +508,7 @@ def upload_file_to_remote_peer():
 
 @app.route('/api/file/download-owned', methods=['POST'])
 def download_owned_file():
-    """Download an owned file from storage peer(s)."""
+    """Download an owned file from storage peer(s) - returns file for download."""
     if not peer_instance:
         return jsonify({"error": "Peer not initialized"}), 500
     
@@ -514,17 +525,13 @@ def download_owned_file():
         if file_data is None:
             return jsonify({"error": "File not found or not accessible"}), 404
         
-        # Save to local storage
-        success = peer_instance.file_storage.put_file(filename, file_data)
-        
-        if success:
-            return jsonify({
-                "success": True,
-                "filename": filename,
-                "size": len(file_data)
-            })
-        else:
-            return jsonify({"error": "Failed to save file"}), 500
+        # Return file for download (not save to peer_storage)
+        return send_file(
+            io.BytesIO(file_data),
+            mimetype='application/octet-stream',
+            as_attachment=True,
+            download_name=filename
+        )
     except Exception as e:
         import traceback
         traceback.print_exc()

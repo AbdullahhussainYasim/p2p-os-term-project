@@ -271,18 +271,14 @@
             <div class="form-section" style="margin-top: 30px;">
                 <h3>Upload File to Remote Peer (Owned Storage)</h3>
                 <p class="description-text" style="margin-bottom: 15px; color: #6c757d;">
-                    Upload a file to another peer's storage. Only you (the owner) can download it later. 
+                    Upload a file from your device to another peer's storage. Only you (the owner) can download it later. 
                     The file will be encrypted and stored securely on the target peer.
                 </p>
-                <form id="file-upload-remote-form">
+                <form id="file-upload-remote-form" enctype="multipart/form-data">
                     <div class="form-group">
-                        <label>Select File from Local Storage:</label>
-                        <select id="remote-upload-filename" class="form-control" required>
-                            <option value="">-- Select a file --</option>
-                        </select>
-                        <button type="button" onclick="populateRemoteUploadFiles()" class="btn btn-secondary" style="margin-top: 5px;">
-                            <i class="fas fa-sync"></i> Refresh File List
-                        </button>
+                        <label>Select File from Device:</label>
+                        <input type="file" id="remote-upload-file" class="form-control" required>
+                        <small class="form-text text-muted">Choose a file from your device to upload to another peer</small>
                     </div>
                     <div class="form-group">
                         <label>Target Peer IP:</label>

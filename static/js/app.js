@@ -80,7 +80,7 @@ function showTab(tabName) {
     
     // Load data when switching to files tab
     if (tabName === 'files') {
-        populateRemoteUploadFiles();
+        // File upload now uses file input, no need to populate dropdown
         loadOwnedFiles();
         loadAvailablePeers();
     }
@@ -90,7 +90,7 @@ function showTab(tabName) {
     
     // Load tab-specific data
     if (tabName === 'files') {
-        populateRemoteUploadFiles();
+        // File upload now uses file input, no need to populate dropdown
         loadOwnedFiles();
         loadAvailablePeers();
     } else if (tabName === 'dashboard') {
@@ -443,13 +443,14 @@ function setupFormHandlers() {
     document.getElementById('file-upload-remote-form').addEventListener('submit', async (e) => {
         e.preventDefault();
         
-        const filename = document.getElementById('remote-upload-filename').value;
+        const fileInput = document.getElementById('remote-upload-file');
+        const file = fileInput.files[0];
         const targetIp = document.getElementById('target-peer-ip').value;
         const targetPort = parseInt(document.getElementById('target-peer-port').value);
         const replication = parseInt(document.getElementById('replication-count').value) || 1;
         
-        if (!filename || !targetIp || !targetPort) {
-            showToast('Please fill in all required fields', 'error');
+        if (!file || !targetIp || !targetPort) {
+            showToast('Please fill in all required fields and select a file', 'error');
             return;
         }
         
@@ -457,17 +458,16 @@ function setupFormHandlers() {
         statusDiv.innerHTML = '<p style="color: #3b82f6;"><i class="fas fa-spinner fa-spin"></i> Uploading to remote peer...</p>';
         
         try {
+            // Create FormData for file upload
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('target_ip', targetIp);
+            formData.append('target_port', targetPort);
+            formData.append('replication', replication);
+            
             const response = await fetch('/api/file/upload-remote', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    filename: filename,
-                    target_ip: targetIp,
-                    target_port: targetPort,
-                    replication: replication
-                })
+                body: formData
             });
             
             const result = await response.json();
@@ -479,6 +479,8 @@ function setupFormHandlers() {
                 statusDiv.innerHTML = `<p style="color: #10b981;"><i class="fas fa-check-circle"></i> File uploaded successfully to ${result.storage_peers.length} peer(s)!</p>`;
                 showToast('File uploaded to remote peer successfully!', 'success');
                 loadOwnedFiles(); // Refresh owned files list
+                // Clear file input
+                fileInput.value = '';
             }
         } catch (error) {
             statusDiv.innerHTML = `<p style="color: #ef4444;"><i class="fas fa-times-circle"></i> Error: ${error.message}</p>`;
@@ -511,16 +513,26 @@ function setupFormHandlers() {
                 })
             });
             
-            const result = await response.json();
-            
-            if (result.error) {
-                statusDiv.innerHTML = `<p style="color: #ef4444;"><i class="fas fa-times-circle"></i> Download Failed: ${result.error}</p>`;
-                showToast('Download failed: ' + result.error, 'error');
-            } else {
-                statusDiv.innerHTML = `<p style="color: #10b981;"><i class="fas fa-check-circle"></i> File downloaded successfully! (${result.size} bytes)</p>`;
-                showToast('Owned file downloaded successfully!', 'success');
-                loadFiles(); // Refresh local files list
+            if (!response.ok) {
+                const error = await response.json();
+                statusDiv.innerHTML = `<p style="color: #ef4444;"><i class="fas fa-times-circle"></i> Download Failed: ${error.error || 'Unknown error'}</p>`;
+                showToast('Download failed: ' + (error.error || 'Unknown error'), 'error');
+                return;
             }
+            
+            // Get file blob and trigger download
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            
+            statusDiv.innerHTML = `<p style="color: #10b981;"><i class="fas fa-check-circle"></i> File downloaded successfully! (${blob.size} bytes)</p>`;
+            showToast('Owned file downloaded successfully!', 'success');
         } catch (error) {
             statusDiv.innerHTML = `<p style="color: #ef4444;"><i class="fas fa-times-circle"></i> Error: ${error.message}</p>`;
             showToast('Error: ' + error.message, 'error');
