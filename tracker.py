@@ -439,11 +439,22 @@ class Tracker:
         filename = msg.get("filename")
         owner_ip = msg.get("owner_ip")
         owner_port = msg.get("owner_port")
+        owner_id = msg.get("owner_id")  # Get peer_id from message
         storage_ip = msg.get("storage_ip", address[0])
         storage_port = msg.get("storage_port")
         
         if not filename or not owner_ip or not owner_port or not storage_port:
             return messages.create_error_message("Missing required fields")
+        
+        # Use peer_id if available, otherwise fall back to (ip, port) as string
+        if not owner_id:
+            # Try to find peer_id from registered peers
+            owner_key = (owner_ip, owner_port)
+            if owner_key in self.peers and self.peers[owner_key].peer_id:
+                owner_id = self.peers[owner_key].peer_id
+            else:
+                # Fallback: use port as ID (backward compatibility)
+                owner_id = f"port_{owner_port}"
         
         owner_key = (owner_ip, owner_port)
         storage_key = (storage_ip, storage_port)
@@ -451,12 +462,20 @@ class Tracker:
         with self.lock:
             if filename in self.owned_file_registry:
                 # Add storage peer to existing entry
-                existing_owner, existing_storage = self.owned_file_registry[filename]
-                if existing_owner == owner_key and storage_key not in existing_storage:
+                entry = self.owned_file_registry[filename]
+                existing_owner_id, existing_owner_addr, existing_storage = self._normalize_registry_entry(entry)
+                # Update owner_id if we have a better one
+                if owner_id and owner_id != existing_owner_id:
+                    existing_owner_id = owner_id
+                # Update owner address if it changed
+                if existing_owner_addr != owner_key:
+                    existing_owner_addr = owner_key
+                if storage_key not in existing_storage:
                     existing_storage.append(storage_key)
+                self.owned_file_registry[filename] = (existing_owner_id, existing_owner_addr, existing_storage)
             else:
                 # New owned file
-                self.owned_file_registry[filename] = (owner_key, [storage_key])
+                self.owned_file_registry[filename] = (owner_id, owner_key, [storage_key])
             
             logger.info(f"Owned file registered: {filename} owned by {owner_ip}:{owner_port}, stored on {storage_ip}:{storage_port}")
             
@@ -502,7 +521,11 @@ class Tracker:
                     return response
                 
                 logger.info(f"File {filename} found in registry, extracting owner and storage peers...")
-                owner_id, owner_key, storage_peers = self.owned_file_registry[filename]
+                entry = self.owned_file_registry[filename]
+                owner_id, owner_key, storage_peers = self._normalize_registry_entry(entry)
+                # Update registry if it was in old format
+                if len(entry) == 2:
+                    self.owned_file_registry[filename] = (owner_id, owner_key, storage_peers)
                 logger.info(f"Found file {filename}: owner_id={owner_id}, owner={owner_key}, storage_peers={storage_peers}")
                 
                 # Get requester's peer_id if available
@@ -609,24 +632,44 @@ class Tracker:
                 filename = file_info.get("filename")
                 owner_ip = file_info.get("owner_ip")
                 owner_port = file_info.get("owner_port")
+                owner_id = file_info.get("owner_id")
                 
                 if not filename or not owner_ip or not owner_port:
                     continue
                 
+                # Use peer_id if available, otherwise use port as fallback
+                if not owner_id:
+                    owner_key = (owner_ip, owner_port)
+                    if owner_key in self.peers and self.peers[owner_key].peer_id:
+                        owner_id = self.peers[owner_key].peer_id
+                    else:
+                        owner_id = f"port_{owner_port}"
+                
                 owner_key = (owner_ip, owner_port)
                 
                 if filename in self.owned_file_registry:
-                    existing_owner, existing_storage = self.owned_file_registry[filename]
-                    if existing_owner[1] == owner_port and storage_key not in existing_storage:
-                        if existing_owner[0] != owner_ip:
-                            existing_owner = (owner_ip, owner_port)
+                    entry = self.owned_file_registry[filename]
+                    existing_owner_id, existing_owner_addr, existing_storage = self._normalize_registry_entry(entry)
+                    # Update owner_id if we have a better one
+                    if owner_id and owner_id != existing_owner_id:
+                        existing_owner_id = owner_id
+                    # Check if owner matches (by peer_id or port)
+                    owner_matches = False
+                    if owner_id and existing_owner_id:
+                        owner_matches = (owner_id == existing_owner_id)
+                    elif existing_owner_addr[1] == owner_port:
+                        owner_matches = True
+                    
+                    if owner_matches and storage_key not in existing_storage:
+                        if existing_owner_addr != owner_key:
+                            existing_owner_addr = owner_key
                         existing_storage.append(storage_key)
-                        self.owned_file_registry[filename] = (existing_owner, existing_storage)
+                        self.owned_file_registry[filename] = (existing_owner_id, existing_owner_addr, existing_storage)
                         updated_count += 1
                 else:
-                    self.owned_file_registry[filename] = (owner_key, [storage_key])
+                    self.owned_file_registry[filename] = (owner_id, owner_key, [storage_key])
                     updated_count += 1
-                    logger.info(f"Rebuilt ownership: {filename} owned by {owner_ip}:{owner_port}, stored on {storage_ip}:{storage_port}")
+                    logger.info(f"Rebuilt ownership: {filename} owned by {owner_id} ({owner_ip}:{owner_port}), stored on {storage_ip}:{storage_port}")
             
             if updated_count > 0:
                 self._save_ownership_state()
@@ -638,27 +681,46 @@ class Tracker:
         """Handle request to list all files owned by a peer."""
         requester_ip = msg.get("requester_ip", address[0])
         requester_port = msg.get("requester_port")
+        requester_id = msg.get("requester_id")
         
-        logger.info(f"LIST_OWNED_FILES request from {requester_ip}:{requester_port}")
+        logger.info(f"LIST_OWNED_FILES request from {requester_ip}:{requester_port} (peer_id: {requester_id})")
         
         if not requester_port:
             return messages.create_error_message("Requester port required")
         
+        # Try to get peer_id from registered peers if not provided
+        if not requester_id:
+            requester_key = (requester_ip, requester_port)
+            if requester_key in self.peers and self.peers[requester_key].peer_id:
+                requester_id = self.peers[requester_key].peer_id
+        
         try:
             with self.lock:
                 owned_files_list = []
-                logger.debug(f"Checking {len(self.owned_file_registry)} files in registry for owner port {requester_port}")
+                logger.debug(f"Checking {len(self.owned_file_registry)} files in registry for owner {requester_id or requester_port}")
                 
-                for filename, (owner_key, storage_peers) in self.owned_file_registry.items():
-                    # Check if this peer is the owner (by port, to handle IP changes)
-                    if owner_key[1] == requester_port:
+                for filename in self.owned_file_registry.keys():
+                    entry = self.owned_file_registry[filename]
+                    owner_id, owner_key, storage_peers = self._normalize_registry_entry(entry)
+                    # Update registry if it was in old format
+                    if len(entry) == 2:
+                        self.owned_file_registry[filename] = (owner_id, owner_key, storage_peers)
+                    
+                    # Check if this peer is the owner (by peer_id first, then port for backward compatibility)
+                    is_owner = False
+                    if requester_id and owner_id:
+                        is_owner = (owner_id == requester_id)
+                    elif owner_key[1] == requester_port:
+                        is_owner = True
+                    
+                    if is_owner:
                         owned_files_list.append({
                             "filename": filename,
                             "storage_peers": [{"ip": ip, "port": port} for ip, port in storage_peers]
                         })
-                        logger.debug(f"Found owned file: {filename} (owner: {owner_key}, storage: {storage_peers})")
+                        logger.debug(f"Found owned file: {filename} (owner_id: {owner_id}, owner: {owner_key}, storage: {storage_peers})")
                 
-                logger.info(f"LIST_OWNED_FILES: Found {len(owned_files_list)} files owned by {requester_ip}:{requester_port}")
+                logger.info(f"LIST_OWNED_FILES: Found {len(owned_files_list)} files owned by {requester_id or requester_port} ({requester_ip}:{requester_port})")
                 return messages.create_status_message("OK", {
                     "owned_files": owned_files_list
                 })
@@ -671,11 +733,18 @@ class Tracker:
         filename = msg.get("filename")
         owner_ip = msg.get("owner_ip", address[0])
         owner_port = msg.get("owner_port")
+        owner_id = msg.get("owner_id")
         
         if not filename:
             return messages.create_error_message("Filename required")
         if not owner_port:
             return messages.create_error_message("Owner port required")
+        
+        # Try to get peer_id from registered peers if not provided
+        if not owner_id:
+            owner_key = (owner_ip, owner_port)
+            if owner_key in self.peers and self.peers[owner_key].peer_id:
+                owner_id = self.peers[owner_key].peer_id
         
         try:
             with self.lock:
@@ -683,10 +752,20 @@ class Tracker:
                     logger.warning(f"DELETE_OWNED_FILE: File {filename} not found in registry")
                     return messages.create_status_message("OK", {"filename": filename, "deleted": False, "message": "File not in registry"})
                 
-                owner_key, storage_peers = self.owned_file_registry[filename]
+                entry = self.owned_file_registry[filename]
+                stored_owner_id, owner_key, storage_peers = self._normalize_registry_entry(entry)
+                # Update registry if it was in old format
+                if len(entry) == 2:
+                    self.owned_file_registry[filename] = (stored_owner_id, owner_key, storage_peers)
                 
-                # Verify ownership
-                if owner_key[1] != owner_port:
+                # Verify ownership (by peer_id first, then port for backward compatibility)
+                ownership_verified = False
+                if owner_id and stored_owner_id:
+                    ownership_verified = (owner_id == stored_owner_id)
+                elif owner_key[1] == owner_port:
+                    ownership_verified = True
+                
+                if not ownership_verified:
                     return messages.create_error_message("Not authorized: You are not the owner of this file")
                 
                 # Remove from registry
@@ -710,7 +789,9 @@ class Tracker:
                         storage_data = entry["storage"]
                         owner_key = (owner_data["ip"], owner_data["port"])
                         storage_keys = [(s["ip"], s["port"]) for s in storage_data]
-                        self.owned_file_registry[filename] = (owner_key, storage_keys)
+                        # Load owner_id if available, otherwise use port as fallback
+                        owner_id = owner_data.get("peer_id") or f"port_{owner_data['port']}"
+                        self.owned_file_registry[filename] = (owner_id, owner_key, storage_keys)
                     logger.info(f"Loaded {len(self.owned_file_registry)} owned file records from disk")
         except Exception as e:
             logger.warning(f"Failed to load ownership state: {e}")
@@ -725,9 +806,15 @@ class Tracker:
         try:
             # Read data while holding lock (assumed to be held by caller)
             data = {}
-            for filename, (owner_key, storage_keys) in self.owned_file_registry.items():
+            for filename in self.owned_file_registry.keys():
+                entry = self.owned_file_registry[filename]
+                owner_id, owner_key, storage_keys = self._normalize_registry_entry(entry)
                 data[filename] = {
-                    "owner": {"ip": owner_key[0], "port": owner_key[1]},
+                    "owner": {
+                        "ip": owner_key[0],
+                        "port": owner_key[1],
+                        "peer_id": owner_id  # Include peer_id for persistence
+                    },
                     "storage": [{"ip": ip, "port": port} for ip, port in storage_keys]
                 }
             
