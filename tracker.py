@@ -294,8 +294,9 @@ class Tracker:
                     else:
                         self.peers[peer_key] = PeerInfo(ip, port, cpu_load, peer_id)
                     
-                    # Update owned file registry to use new address
+                    # Update owned file registry to use new address AND upgrade owner_id from port_XXX to real peer_id
                     self._update_peer_address_in_registry(peer_id, old_key, peer_key)
+                    self._upgrade_owner_id_in_registry(peer_id, port)  # Upgrade port_XXX entries to real peer_id
                     logger.info(f"Updated peer registration: {ip}:{port} (load: {cpu_load}, peer_id: {peer_id})")
                 else:
                     # Same address, just update load
@@ -476,6 +477,25 @@ class Tracker:
             self._save_ownership_state()
             logger.info(f"Updated {updated_count} owned file records for peer {peer_id}")
     
+    def _upgrade_owner_id_in_registry(self, peer_id: str, port: int):
+        """Upgrade owner_id from port_XXX format to real peer_id when peer re-registers."""
+        port_based_id = f"port_{port}"
+        updated_count = 0
+        
+        for filename in list(self.owned_file_registry.keys()):
+            entry = self.owned_file_registry[filename]
+            owner_id, owner_addr, storage_peers = self._normalize_registry_entry(entry)
+            
+            # If owner_id is port-based and matches this peer's port, upgrade to real peer_id
+            if owner_id == port_based_id and owner_addr[1] == port:
+                self.owned_file_registry[filename] = (peer_id, owner_addr, storage_peers)
+                updated_count += 1
+                logger.info(f"Upgraded owner_id for {filename}: {port_based_id} -> {peer_id}")
+        
+        if updated_count > 0:
+            self._save_ownership_state()
+            logger.info(f"Upgraded {updated_count} owned file records from port_{port} to {peer_id}")
+    
     def _handle_register_owned_file(self, msg: Dict, address: Tuple[str, int]) -> Dict:
         """Handle owned file registration."""
         filename = msg.get("filename")
@@ -584,6 +604,13 @@ class Tracker:
                     if owner_id == requester_id:
                         ownership_verified = True
                         logger.info(f"Ownership verified by peer_id: {owner_id}")
+                    elif owner_id.startswith("port_") and owner_id == f"port_{requester_port}":
+                        # Owner_id is port-based (old format), verify by port and upgrade to real peer_id
+                        ownership_verified = True
+                        logger.info(f"Ownership verified by port (upgrading owner_id from {owner_id} to {requester_id})")
+                        # Upgrade owner_id to real peer_id
+                        self.owned_file_registry[filename] = (requester_id, owner_key, storage_peers)
+                        owner_id = requester_id
                     else:
                         logger.warning(f"Ownership mismatch: owner_id {owner_id} != requester_id {requester_id}")
                 elif owner_key[1] == requester_port:
@@ -751,9 +778,20 @@ class Tracker:
                     # Check if this peer is the owner (by peer_id first, then port for backward compatibility)
                     is_owner = False
                     if requester_id and owner_id:
-                        is_owner = (owner_id == requester_id)
+                        if owner_id == requester_id:
+                            is_owner = True
+                        elif owner_id.startswith("port_") and owner_id == f"port_{requester_port}":
+                            # Owner_id is port-based, verify by port and upgrade
+                            is_owner = True
+                            # Upgrade owner_id to real peer_id
+                            self.owned_file_registry[filename] = (requester_id, owner_key, storage_peers)
+                            owner_id = requester_id
                     elif owner_key[1] == requester_port:
                         is_owner = True
+                        # Upgrade owner_id if we now have it
+                        if requester_id:
+                            self.owned_file_registry[filename] = (requester_id, owner_key, storage_peers)
+                            owner_id = requester_id
                     
                     if is_owner:
                         owned_files_list.append({
@@ -803,9 +841,20 @@ class Tracker:
                 # Verify ownership (by peer_id first, then port for backward compatibility)
                 ownership_verified = False
                 if owner_id and stored_owner_id:
-                    ownership_verified = (owner_id == stored_owner_id)
+                    if owner_id == stored_owner_id:
+                        ownership_verified = True
+                    elif stored_owner_id.startswith("port_") and stored_owner_id == f"port_{owner_port}":
+                        # Stored owner_id is port-based, verify by port and upgrade
+                        ownership_verified = True
+                        # Upgrade stored_owner_id to real peer_id
+                        stored_owner_id = owner_id
+                        self.owned_file_registry[filename] = (owner_id, owner_key, storage_peers)
                 elif owner_key[1] == owner_port:
                     ownership_verified = True
+                    # Upgrade owner_id if we now have it
+                    if owner_id:
+                        self.owned_file_registry[filename] = (owner_id, owner_key, storage_peers)
+                        stored_owner_id = owner_id
                 
                 if not ownership_verified:
                     return messages.create_error_message("Not authorized: You are not the owner of this file")
