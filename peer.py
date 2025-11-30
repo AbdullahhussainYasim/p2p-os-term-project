@@ -1364,6 +1364,69 @@ class Peer:
             logger.error(f"Failed to retrieve owned file: {e}", exc_info=True)
             return messages.create_error_message(f"GET_OWNED_FILE failed: {e}")
     
+    def _handle_delete_owned_file(self, msg: Dict, address: Tuple[str, int]) -> Dict:
+        """Handle request to delete an owned file from this peer's storage."""
+        filename = msg.get("filename")
+        requester_ip = msg.get("requester_ip", address[0])
+        requester_port = msg.get("requester_port")
+        
+        if not filename:
+            return messages.create_error_message("Filename required")
+        if not requester_port:
+            return messages.create_error_message("Requester port required")
+        
+        try:
+            with self.ownership_lock:
+                # Check if we have this file stored for the requester
+                if filename not in self.stored_for_others:
+                    # Try to reconstruct metadata
+                    self._reconstruct_owned_files_metadata()
+                    if filename not in self.stored_for_others:
+                        return messages.create_error_message("File not found on this peer")
+                
+                owner_ip, owner_port = self.stored_for_others[filename]
+                
+                # Verify ownership - use port as primary identifier (handles IP changes)
+                if owner_port != requester_port:
+                    logger.warning(f"Delete request denied: owner port {owner_port} != requester port {requester_port}")
+                    return messages.create_error_message("Not authorized: You are not the owner of this file")
+                
+                # Delete the file from disk
+                from pathlib import Path
+                owned_storage_base = Path(config.OWNED_STORAGE_DIR)
+                owner_dir = owned_storage_base / f"{owner_ip}_{owner_port}"
+                file_path = owner_dir / filename
+                
+                if not file_path.exists():
+                    # Try with requester_ip in case IP changed
+                    owner_dir = owned_storage_base / f"{requester_ip}_{requester_port}"
+                    file_path = owner_dir / filename
+                
+                if file_path.exists():
+                    file_path.unlink()
+                    logger.info(f"Deleted owned file {filename} for {owner_ip}:{owner_port}")
+                    
+                    # Remove from metadata
+                    del self.stored_for_others[filename]
+                    
+                    # If directory is empty, remove it
+                    try:
+                        if owner_dir.exists() and not any(owner_dir.iterdir()):
+                            owner_dir.rmdir()
+                            logger.debug(f"Removed empty owner directory: {owner_dir}")
+                    except:
+                        pass
+                    
+                    return messages.create_status_message("OK", {"filename": filename, "deleted": True})
+                else:
+                    # File not found on disk, but remove from metadata anyway
+                    if filename in self.stored_for_others:
+                        del self.stored_for_others[filename]
+                    return messages.create_error_message("File not found on disk")
+        except Exception as e:
+            logger.error(f"Failed to delete owned file: {e}", exc_info=True)
+            return messages.create_error_message(f"DELETE_OWNED_FILE failed: {e}")
+    
     def _reconstruct_owned_files_metadata(self):
         """Reconstruct owned files metadata from disk (after peer restart)."""
         try:
