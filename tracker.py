@@ -294,9 +294,12 @@ class Tracker:
                     else:
                         self.peers[peer_key] = PeerInfo(ip, port, cpu_load, peer_id)
                     
-                    # Update owned file registry to use new address AND upgrade owner_id from port_XXX to real peer_id
+                    # Update peers_by_id first so _upgrade_owner_id_in_registry can use it
+                    self.peers_by_id[peer_id] = peer_key
+                    # Upgrade owner_id from port_XXX to real peer_id (this also updates addresses)
+                    self._upgrade_owner_id_in_registry(peer_id, port)
+                    # Update owned file registry to use new address (for files already with real peer_id)
                     self._update_peer_address_in_registry(peer_id, old_key, peer_key)
-                    self._upgrade_owner_id_in_registry(peer_id, port)  # Upgrade port_XXX entries to real peer_id
                     logger.info(f"Updated peer registration: {ip}:{port} (load: {cpu_load}, peer_id: {peer_id})")
                 else:
                     # Same address, just update load
@@ -304,6 +307,8 @@ class Tracker:
                         self.peers[peer_key].update_load(cpu_load)
                     else:
                         self.peers[peer_key] = PeerInfo(ip, port, cpu_load, peer_id)
+                    # Still upgrade owner_id in case it was port_XXX format
+                    self._upgrade_owner_id_in_registry(peer_id, port)
                     logger.info(f"Updated peer registration: {ip}:{port} (load: {cpu_load})")
             elif peer_key in self.peers:
                 # Update existing peer (no peer_id or new registration)
@@ -458,19 +463,24 @@ class Tracker:
             entry = self.owned_file_registry[filename]
             owner_id, owner_addr, storage_peers = self._normalize_registry_entry(entry)
             
-            # Update owner address if it matches
-            if owner_id == peer_id and owner_addr == old_key:
-                self.owned_file_registry[filename] = (owner_id, new_key, storage_peers)
-                updated_count += 1
+            # Update owner address if peer_id matches (regardless of old address)
+            if owner_id == peer_id:
+                if owner_addr != new_key:
+                    self.owned_file_registry[filename] = (owner_id, new_key, storage_peers)
+                    updated_count += 1
+                    logger.info(f"Updated owner address for {filename}: {owner_addr} -> {new_key}")
+            
             # Update storage peers if they match
             new_storage = []
+            storage_updated = False
             for storage_key in storage_peers:
                 if storage_key == old_key:
                     new_storage.append(new_key)
+                    storage_updated = True
                     updated_count += 1
                 else:
                     new_storage.append(storage_key)
-            if new_storage != storage_peers:
+            if storage_updated:
                 self.owned_file_registry[filename] = (owner_id, owner_addr, new_storage)
         
         if updated_count > 0:
@@ -487,10 +497,20 @@ class Tracker:
             owner_id, owner_addr, storage_peers = self._normalize_registry_entry(entry)
             
             # If owner_id is port-based and matches this peer's port, upgrade to real peer_id
+            # Also update the address to the current peer's address
             if owner_id == port_based_id and owner_addr[1] == port:
-                self.owned_file_registry[filename] = (peer_id, owner_addr, storage_peers)
-                updated_count += 1
-                logger.info(f"Upgraded owner_id for {filename}: {port_based_id} -> {peer_id}")
+                # Get current peer address from peers_by_id
+                current_addr = self.peers_by_id.get(peer_id)
+                if current_addr:
+                    # Upgrade both owner_id and address
+                    self.owned_file_registry[filename] = (peer_id, current_addr, storage_peers)
+                    updated_count += 1
+                    logger.info(f"Upgraded owner_id for {filename}: {port_based_id} -> {peer_id}, address: {owner_addr} -> {current_addr}")
+                else:
+                    # Just upgrade owner_id, keep old address
+                    self.owned_file_registry[filename] = (peer_id, owner_addr, storage_peers)
+                    updated_count += 1
+                    logger.info(f"Upgraded owner_id for {filename}: {port_based_id} -> {peer_id}")
         
         if updated_count > 0:
             self._save_ownership_state()
@@ -640,7 +660,8 @@ class Tracker:
                     new_owner_key = (requester_ip, requester_port)
                     self.owned_file_registry[filename] = (owner_id, new_owner_key, storage_peers)
                     owner_key = new_owner_key
-                    # Don't save state here - do it after response is sent to avoid blocking
+                    # Save state immediately to persist the address update
+                    self._save_ownership_state()
                 
                 # Filter to only alive storage peers
                 logger.info(f"Filtering {len(storage_peers)} storage peers for {filename}...")
