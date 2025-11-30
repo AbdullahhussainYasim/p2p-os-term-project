@@ -1258,9 +1258,22 @@ class Peer:
             with self.ownership_lock:
                 self.stored_for_others[filename] = (owner_ip, owner_port)
             
-            # Register with tracker
-            logger.debug("Registering file with tracker...")
-            self._register_owned_file_with_tracker(filename, self.peer_ip, self.peer_port)
+            # Register with tracker (owner is the one who uploaded, storage is this peer)
+            logger.debug(f"Registering file with tracker: owner={owner_ip}:{owner_port}, storage={self.peer_ip}:{self.peer_port}")
+            # Note: We need to send a message to tracker with correct owner info
+            # The storage peer registers the file, but owner info comes from the upload message
+            try:
+                msg = messages.create_message(
+                    messages.MessageType.REGISTER_OWNED_FILE,
+                    filename=filename,
+                    owner_ip=owner_ip,  # Actual owner who uploaded
+                    owner_port=owner_port,  # Actual owner port
+                    storage_ip=self.peer_ip,  # This peer is the storage
+                    storage_port=self.peer_port
+                )
+                self._send_to_tracker(msg)
+            except Exception as e:
+                logger.warning(f"Failed to register owned file with tracker: {e}")
             
             logger.info(f"Stored owned file {filename} for {owner_ip}:{owner_port} (encrypted, {len(encrypted_data)} bytes)")
             
@@ -1497,8 +1510,12 @@ class Peer:
         )
         
         response = self._send_to_tracker(msg)
-        if not response or response.get("type") != messages.MessageType.OWNED_FILE_RESPONSE:
-            logger.error("Failed to query tracker for owned file")
+        if not response:
+            logger.error("No response from tracker when querying for owned file")
+            return None
+        
+        if response.get("type") != messages.MessageType.OWNED_FILE_RESPONSE:
+            logger.error(f"Unexpected response type from tracker: {response.get('type')}, error: {response.get('error', 'unknown')}")
             return None
         
         if not response.get("found"):
