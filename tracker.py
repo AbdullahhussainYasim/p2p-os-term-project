@@ -204,28 +204,35 @@ class Tracker:
         """Process a message and return response."""
         msg_type = msg.get("type")
         
-        if msg_type == messages.MessageType.REGISTER:
-            return self._handle_register(msg, address)
-        elif msg_type == messages.MessageType.UNREGISTER:
-            return self._handle_unregister(msg, address)
-        elif msg_type == messages.MessageType.UPDATE_LOAD:
-            return self._handle_update_load(msg, address)
-        elif msg_type == messages.MessageType.REQUEST_CPU:
-            return self._handle_request_cpu(msg)
-        elif msg_type == messages.MessageType.REGISTER_FILE:
-            return self._handle_register_file(msg, address)
-        elif msg_type == messages.MessageType.FIND_FILE:
-            return self._handle_find_file(msg)
-        elif msg_type == messages.MessageType.REGISTER_OWNED_FILE:
-            return self._handle_register_owned_file(msg, address)
-        elif msg_type == messages.MessageType.FIND_OWNED_FILE:
-            return self._handle_find_owned_file(msg, address)
-        elif msg_type == messages.MessageType.REPORT_OWNED_FILES:
-            return self._handle_report_owned_files(msg, address)
-        elif msg_type == messages.MessageType.STATUS:
-            return self._handle_status()
-        else:
-            return messages.create_error_message(f"Unknown message type: {msg_type}")
+        try:
+            if msg_type == messages.MessageType.REGISTER:
+                return self._handle_register(msg, address)
+            elif msg_type == messages.MessageType.UNREGISTER:
+                return self._handle_unregister(msg, address)
+            elif msg_type == messages.MessageType.UPDATE_LOAD:
+                return self._handle_update_load(msg, address)
+            elif msg_type == messages.MessageType.REQUEST_CPU:
+                return self._handle_request_cpu(msg)
+            elif msg_type == messages.MessageType.REGISTER_FILE:
+                return self._handle_register_file(msg, address)
+            elif msg_type == messages.MessageType.FIND_FILE:
+                return self._handle_find_file(msg)
+            elif msg_type == messages.MessageType.REGISTER_OWNED_FILE:
+                return self._handle_register_owned_file(msg, address)
+            elif msg_type == messages.MessageType.FIND_OWNED_FILE:
+                logger.debug(f"Calling _handle_find_owned_file for {msg.get('filename')}")
+                response = self._handle_find_owned_file(msg, address)
+                logger.debug(f"_handle_find_owned_file returned: type={response.get('type') if response else None}")
+                return response
+            elif msg_type == messages.MessageType.REPORT_OWNED_FILES:
+                return self._handle_report_owned_files(msg, address)
+            elif msg_type == messages.MessageType.STATUS:
+                return self._handle_status()
+            else:
+                return messages.create_error_message(f"Unknown message type: {msg_type}")
+        except Exception as e:
+            logger.error(f"Exception in _process_message for {msg_type}: {e}", exc_info=True)
+            return messages.create_error_message(f"Error processing {msg_type}: {e}")
     
     def _handle_register(self, msg: Dict, address: Tuple[str, int]) -> Dict:
         """Handle peer registration."""
@@ -411,30 +418,38 @@ class Tracker:
             return messages.create_error_message("Requester port required")
         
         try:
+            alive_storage_peers = []
+            owner_key = None
+            
             with self.lock:
                 logger.debug(f"Checking registry for {filename}. Total files in registry: {len(self.owned_file_registry)}")
+                logger.debug(f"Files in registry: {list(self.owned_file_registry.keys())}")
+                
                 if filename not in self.owned_file_registry:
                     logger.warning(f"FIND_OWNED_FILE: File {filename} not found in registry (total files: {len(self.owned_file_registry)})")
-                    logger.debug(f"Files in registry: {list(self.owned_file_registry.keys())}")
-                    return messages.create_message(
+                    response = messages.create_message(
                         messages.MessageType.OWNED_FILE_RESPONSE,
                         filename=filename,
                         found=False,
                         error="File not found"
                     )
+                    logger.info(f"Returning response: file not found")
+                    return response
                 
                 owner_key, storage_peers = self.owned_file_registry[filename]
-                logger.debug(f"Found file {filename}: owner={owner_key}, storage_peers={storage_peers}")
+                logger.info(f"Found file {filename}: owner={owner_key}, storage_peers={storage_peers}")
                 
                 # Verify ownership - use port as primary identifier (handles IP changes)
                 if owner_key[1] != requester_port:
                     logger.warning(f"Ownership mismatch: owner port {owner_key[1]} != requester port {requester_port}")
-                    return messages.create_message(
+                    response = messages.create_message(
                         messages.MessageType.OWNED_FILE_RESPONSE,
                         filename=filename,
                         found=False,
                         error="Not authorized: You are not the owner of this file"
                     )
+                    logger.info(f"Returning response: not authorized")
+                    return response
                 
                 # If IP changed but port matches, update the ownership record
                 if owner_key[0] != requester_ip:
@@ -445,7 +460,6 @@ class Tracker:
                     self._save_ownership_state()
                 
                 # Filter to only alive storage peers
-                alive_storage_peers = []
                 for storage_key in storage_peers:
                     if storage_key in self.peers and self.peers[storage_key].is_alive(config.PEER_TIMEOUT):
                         alive_storage_peers.append({"ip": storage_key[0], "port": storage_key[1]})
@@ -459,6 +473,7 @@ class Tracker:
                     self.owned_file_registry[filename] = (owner_key, [(p["ip"], p["port"]) for p in alive_storage_peers])
                     self._save_ownership_state()
             
+            # Create response outside the lock
             response = messages.create_message(
                 messages.MessageType.OWNED_FILE_RESPONSE,
                 filename=filename,
@@ -467,7 +482,7 @@ class Tracker:
                 owner_port=owner_key[1],
                 storage_peers=alive_storage_peers
             )
-            logger.info(f"Sending OWNED_FILE_RESPONSE for {filename}: found={len(alive_storage_peers) > 0}, peers={len(alive_storage_peers)}")
+            logger.info(f"Created OWNED_FILE_RESPONSE for {filename}: found={len(alive_storage_peers) > 0}, peers={len(alive_storage_peers)}")
             return response
         except Exception as e:
             logger.error(f"Error in _handle_find_owned_file: {e}", exc_info=True)
