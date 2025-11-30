@@ -221,7 +221,7 @@ class Peer:
                 messages.MessageType.REGISTER,
                 ip=current_ip,
                 port=self.peer_port,
-                cpu_load=self.scheduler.get_load(),
+                cpu_load=self._get_current_load(),
                 old_ip=self.old_peer_ip if self.old_peer_ip else None,
                 peer_id=self.peer_id  # Include persistent peer ID
             )
@@ -266,7 +266,7 @@ class Peer:
             time.sleep(config.HEARTBEAT_INTERVAL)
             
             try:
-                current_load = self.scheduler.get_load()
+                current_load = self._get_current_load()
                 msg = messages.create_message(
                     messages.MessageType.UPDATE_LOAD,
                     ip=self.peer_ip,
@@ -422,8 +422,11 @@ class Peer:
             if status == "SUCCESS" and result_msg.get("result") is not None:
                 self.result_cache.put(program, function, args, result_msg.get("result"))
         
-        # Submit to scheduler
-        self.scheduler.submit_task(msg, result_callback)
+        # Submit to scheduler (route to active scheduler)
+        if self.use_advanced_scheduler:
+            self.advanced_scheduler.submit_task(msg, result_callback)
+        else:
+            self.scheduler.submit_task(msg, result_callback)
         
         # Wait for result (with timeout)
         timeout = msg.get("timeout", config.TASK_TIMEOUT)
@@ -448,7 +451,12 @@ class Peer:
         if not task_id:
             return messages.create_error_message("task_id required")
         
-        cancelled = self.scheduler.cancel_task(task_id)
+        # Cancel task (route to active scheduler)
+        if self.use_advanced_scheduler:
+            # Advanced scheduler uses cancel_process with task_id as pid
+            cancelled = self.advanced_scheduler.cancel_process(task_id)
+        else:
+            cancelled = self.scheduler.cancel_task(task_id)
         if cancelled:
             return messages.create_status_message("CANCELLED", {"task_id": task_id})
         else:
@@ -696,7 +704,11 @@ class Peer:
                 result_container["result"] = result_msg
                 result_container["ready"].set()
             
-            self.scheduler.submit_task(task, result_callback)
+            # Submit to scheduler (route to active scheduler)
+            if self.use_advanced_scheduler:
+                self.advanced_scheduler.submit_task(task, result_callback)
+            else:
+                self.scheduler.submit_task(task, result_callback)
             
             # Wait for result
             if result_container["ready"].wait(timeout=config.TASK_TIMEOUT):
@@ -785,7 +797,12 @@ class Peer:
     
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a task by ID."""
-        return self.scheduler.cancel_task(task_id)
+        # Cancel task (route to active scheduler)
+        if self.use_advanced_scheduler:
+            # Advanced scheduler uses cancel_process with task_id as pid
+            return self.advanced_scheduler.cancel_process(task_id)
+        else:
+            return self.scheduler.cancel_task(task_id)
     
     def submit_batch_tasks(self, tasks: list) -> list:
         """
@@ -1065,20 +1082,49 @@ class Peer:
         
         if algorithm:
             try:
+                # Check if switching back to Round Robin
+                if algorithm.upper() == "ROUND_ROBIN" or algorithm.upper() == "RR":
+                    if self.use_advanced_scheduler:
+                        # Switch back to Round Robin scheduler
+                        self.advanced_scheduler.stop()
+                        self.scheduler.start()
+                        self.use_advanced_scheduler = False
+                        logger.info("Switched back to Round Robin scheduler")
+                        return messages.create_status_message("OK", {"algorithm": "ROUND_ROBIN"})
+                    else:
+                        # Already using Round Robin
+                        return messages.create_status_message("OK", {"algorithm": "ROUND_ROBIN"})
+                
+                # Switch to advanced scheduler with specified algorithm
                 algo = SchedulingAlgorithm[algorithm]
                 if not self.use_advanced_scheduler:
+                    # Switching from Round Robin to Advanced
                     self.scheduler.stop()
                     self.advanced_scheduler.set_algorithm(algo)
                     self.advanced_scheduler.start()
                     self.use_advanced_scheduler = True
+                    logger.info(f"Switched to Advanced scheduler with {algorithm} algorithm")
                 else:
+                    # Already using Advanced, just change algorithm
                     self.advanced_scheduler.set_algorithm(algo)
+                    logger.info(f"Changed Advanced scheduler algorithm to {algorithm}")
                 
                 return messages.create_status_message("OK", {"algorithm": algorithm})
             except KeyError:
-                return messages.create_error_message(f"Unknown algorithm: {algorithm}")
+                return messages.create_error_message(f"Unknown algorithm: {algorithm}. Available: FCFS, SJF, PRIORITY, RR, MULTILEVEL, ROUND_ROBIN")
         else:
             return messages.create_error_message("algorithm required")
+    
+    def _get_current_load(self) -> float:
+        """Get current CPU load from the active scheduler."""
+        if self.use_advanced_scheduler:
+            # Advanced scheduler doesn't have get_load(), calculate from queue size
+            stats = self.advanced_scheduler.get_statistics()
+            queue_size = stats.get("queue_size", 0)
+            # Calculate load similar to RoundRobinScheduler (queue_size * 0.1, max 0.95)
+            return min(0.95, queue_size * 0.1)
+        else:
+            return self.scheduler.get_load()
     
     # Network helper methods
     
