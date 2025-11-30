@@ -434,6 +434,48 @@ class Tracker:
             found=len(alive_peers) > 0
         )
     
+    def _normalize_registry_entry(self, entry):
+        """Normalize registry entry to new format (owner_id, owner_key, storage_peers).
+        Handles both old format (owner_key, storage_peers) and new format.
+        """
+        if len(entry) == 2:
+            # Old format: (owner_key, storage_peers)
+            owner_key, storage_peers = entry
+            # Generate owner_id from port (backward compatibility)
+            owner_id = f"port_{owner_key[1]}"
+            return (owner_id, owner_key, storage_peers)
+        elif len(entry) == 3:
+            # New format: (owner_id, owner_key, storage_peers)
+            return entry
+        else:
+            raise ValueError(f"Unexpected registry entry format: {entry}")
+    
+    def _update_peer_address_in_registry(self, peer_id: str, old_key: Tuple[str, int], new_key: Tuple[str, int]):
+        """Update peer address in owned file registry when IP/port changes."""
+        updated_count = 0
+        for filename in list(self.owned_file_registry.keys()):
+            entry = self.owned_file_registry[filename]
+            owner_id, owner_addr, storage_peers = self._normalize_registry_entry(entry)
+            
+            # Update owner address if it matches
+            if owner_id == peer_id and owner_addr == old_key:
+                self.owned_file_registry[filename] = (owner_id, new_key, storage_peers)
+                updated_count += 1
+            # Update storage peers if they match
+            new_storage = []
+            for storage_key in storage_peers:
+                if storage_key == old_key:
+                    new_storage.append(new_key)
+                    updated_count += 1
+                else:
+                    new_storage.append(storage_key)
+            if new_storage != storage_peers:
+                self.owned_file_registry[filename] = (owner_id, owner_addr, new_storage)
+        
+        if updated_count > 0:
+            self._save_ownership_state()
+            logger.info(f"Updated {updated_count} owned file records for peer {peer_id}")
+    
     def _handle_register_owned_file(self, msg: Dict, address: Tuple[str, int]) -> Dict:
         """Handle owned file registration."""
         filename = msg.get("filename")
