@@ -32,6 +32,7 @@ class MessageType:
     FIND_FILE = "FIND_FILE"
     FILE_PEERS = "FILE_PEERS"
     REGISTER_FILE = "REGISTER_FILE"
+    UNREGISTER_FILE = "UNREGISTER_FILE"
     GET_FILE_CHUNK = "GET_FILE_CHUNK"
     
     # Owned file messages (for remote storage with ownership)

@@ -236,6 +236,8 @@ class Tracker:
                 return self._handle_request_cpu(msg)
             elif msg_type == messages.MessageType.REGISTER_FILE:
                 return self._handle_register_file(msg, address)
+            elif msg_type == messages.MessageType.UNREGISTER_FILE:
+                return self._handle_unregister_file(msg, address)
             elif msg_type == messages.MessageType.FIND_FILE:
                 return self._handle_find_file(msg)
             elif msg_type == messages.MessageType.REGISTER_OWNED_FILE:
@@ -449,6 +451,32 @@ class Tracker:
             if peer_key not in self.file_registry[filename]:
                 self.file_registry[filename].append(peer_key)
                 logger.info(f"File registered: {filename} on {ip}:{port}")
+        
+        return messages.create_status_message("OK", {"filename": filename})
+    
+    def _handle_unregister_file(self, msg: Dict, address: Tuple[str, int]) -> Dict:
+        """Handle file unregistration (peer announces it no longer has a file)."""
+        filename = msg.get("filename")
+        ip = msg.get("ip", address[0])
+        port = msg.get("port")
+        
+        if not filename:
+            return messages.create_error_message("Filename required")
+        if not port:
+            return messages.create_error_message("Port required")
+        
+        peer_key = (ip, port)
+        
+        with self.lock:
+            if filename in self.file_registry:
+                if peer_key in self.file_registry[filename]:
+                    self.file_registry[filename].remove(peer_key)
+                    logger.info(f"File unregistered: {filename} removed from {ip}:{port}")
+                    
+                    # Remove entry if no peers have the file
+                    if not self.file_registry[filename]:
+                        del self.file_registry[filename]
+                        logger.info(f"File {filename} removed from registry (no peers have it)")
         
         return messages.create_status_message("OK", {"filename": filename})
     

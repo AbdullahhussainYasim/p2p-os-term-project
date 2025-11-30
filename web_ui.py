@@ -406,6 +406,9 @@ def delete_file():
             return jsonify({"error": "filename required"}), 400
         
         deleted = peer_instance.file_storage.delete_file(filename)
+        if deleted:
+            # Unregister file from tracker
+            peer_instance._unregister_file_with_tracker(filename)
         return jsonify({"success": deleted, "filename": filename})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

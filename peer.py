@@ -788,8 +788,12 @@ class Peer:
         return self.memory_store.get(key)
     
     def put_file(self, filename: str, data: bytes) -> bool:
-        """Store a file locally."""
-        return self.file_storage.put_file(filename, data)
+        """Store a file locally and register it with the tracker."""
+        success = self.file_storage.put_file(filename, data)
+        if success:
+            # Register file with tracker so other peers can find it
+            self._register_file_with_tracker(filename)
+        return success
     
     def get_file(self, filename: str) -> Optional[bytes]:
         """Retrieve a file locally."""
@@ -1138,8 +1142,23 @@ class Peer:
                 port=self.peer_port
             )
             self._send_to_tracker(msg)
+            logger.debug(f"Registered file {filename} with tracker")
         except Exception as e:
-            logger.debug(f"Failed to register file with tracker: {e}")
+            logger.warning(f"Failed to register file with tracker: {e}")
+    
+    def _unregister_file_with_tracker(self, filename: str):
+        """Unregister a file from the tracker."""
+        try:
+            msg = messages.create_message(
+                messages.MessageType.UNREGISTER_FILE,
+                filename=filename,
+                ip=self.peer_ip,
+                port=self.peer_port
+            )
+            self._send_to_tracker(msg)
+            logger.debug(f"Unregistered file {filename} from tracker")
+        except Exception as e:
+            logger.warning(f"Failed to unregister file from tracker: {e}")
     
     def find_file_on_network(self, filename: str) -> List[Tuple[str, int]]:
         """Find which peers have a file."""
