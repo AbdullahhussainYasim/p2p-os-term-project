@@ -1218,18 +1218,21 @@ class Peer:
         owner_ip = msg.get("owner_ip")
         owner_port = msg.get("owner_port")
         
+        logger.info(f"Received UPLOAD_TO_PEER request for {filename} from {owner_ip}:{owner_port}")
+        
         if not filename or not data_b64 or not owner_ip or not owner_port:
+            logger.warning("Missing required fields in UPLOAD_TO_PEER request")
             return messages.create_error_message("Missing required fields")
         
         try:
-            # Decode and decrypt data
+            # Decode base64 data
+            logger.debug(f"Decoding base64 data (length: {len(data_b64)})...")
             encrypted_data = base64.b64decode(data_b64)
-            # Note: We store encrypted, owner will decrypt when retrieving
-            # But we need to decrypt to verify it's valid data
-            # Actually, we'll store it encrypted and owner decrypts on retrieval
+            logger.debug(f"Decoded to {len(encrypted_data)} bytes")
             
             # Check file size
             if len(encrypted_data) > config.MAX_FILE_SIZE:
+                logger.warning(f"File too large: {len(encrypted_data)} bytes")
                 return messages.create_error_message(f"File too large (max {config.MAX_FILE_SIZE} bytes)")
             
             # Store in owned_storage directory with restricted permissions
@@ -1243,6 +1246,7 @@ class Peer:
             
             # Store encrypted file
             file_path = owner_dir / filename
+            logger.debug(f"Storing file to {file_path}...")
             with open(file_path, 'wb') as f:
                 f.write(encrypted_data)
             
@@ -1255,14 +1259,17 @@ class Peer:
                 self.stored_for_others[filename] = (owner_ip, owner_port)
             
             # Register with tracker
+            logger.debug("Registering file with tracker...")
             self._register_owned_file_with_tracker(filename, self.peer_ip, self.peer_port)
             
-            logger.info(f"Stored owned file {filename} for {owner_ip}:{owner_port} (encrypted)")
+            logger.info(f"Stored owned file {filename} for {owner_ip}:{owner_port} (encrypted, {len(encrypted_data)} bytes)")
             
-            return messages.create_status_message("OK", {
+            response = messages.create_status_message("OK", {
                 "filename": filename,
                 "size": len(encrypted_data)
             })
+            logger.debug(f"Sending OK response for {filename}")
+            return response
         except Exception as e:
             logger.error(f"Failed to store owned file: {e}", exc_info=True)
             return messages.create_error_message(f"UPLOAD_TO_PEER failed: {e}")
@@ -1397,10 +1404,20 @@ class Peer:
         
         # Upload to target peers (up to replication count)
         for target_ip, target_port in target_peers[:replication]:
+            # Prevent uploading to yourself
+            if target_ip == self.peer_ip and target_port == self.peer_port:
+                errors.append(f"{target_ip}:{target_port}: Cannot upload to yourself")
+                logger.warning(f"Skipping self-upload to {target_ip}:{target_port}")
+                continue
+            
+            sock = None
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(config.SOCKET_TIMEOUT)
+                # Use longer timeout for large file uploads
+                upload_timeout = max(config.SOCKET_TIMEOUT, 60)  # At least 60 seconds
+                sock.settimeout(upload_timeout)
                 
+                logger.info(f"Connecting to {target_ip}:{target_port} for upload of {filename} ({len(encrypted_data)} bytes)...")
                 sock.connect((target_ip, target_port))
                 
                 msg = messages.create_message(
@@ -1411,24 +1428,40 @@ class Peer:
                     owner_port=self.peer_port
                 )
                 
+                logger.debug(f"Sending upload message to {target_ip}:{target_port}...")
                 self._send_message(sock, messages.serialize_message(msg))
                 
+                logger.debug(f"Waiting for response from {target_ip}:{target_port}...")
                 response_data = self._receive_message(sock)
+                
                 if response_data:
                     response = messages.deserialize_message(response_data)
+                    logger.debug(f"Received response from {target_ip}:{target_port}: {response.get('status', 'unknown')}")
                     if response.get("status") == "OK":
                         successful_peers.append((target_ip, target_port))
                         # Register with tracker
                         self._register_owned_file_with_tracker(filename, target_ip, target_port)
+                        logger.info(f"Successfully uploaded {filename} to {target_ip}:{target_port}")
                     else:
-                        errors.append(f"{target_ip}:{target_port}: {response.get('error', 'Unknown error')}")
+                        error_msg = response.get('error', 'Unknown error')
+                        errors.append(f"{target_ip}:{target_port}: {error_msg}")
+                        logger.warning(f"Upload failed: {error_msg}")
                 else:
                     errors.append(f"{target_ip}:{target_port}: No response")
+                    logger.warning(f"No response received from {target_ip}:{target_port}")
                 
-                sock.close()
+            except socket.timeout:
+                errors.append(f"{target_ip}:{target_port}: Connection timeout")
+                logger.error(f"Timeout uploading to {target_ip}:{target_port}")
             except Exception as e:
                 errors.append(f"{target_ip}:{target_port}: {str(e)}")
-                logger.error(f"Failed to upload to {target_ip}:{target_port}: {e}")
+                logger.error(f"Failed to upload to {target_ip}:{target_port}: {e}", exc_info=True)
+            finally:
+                if sock:
+                    try:
+                        sock.close()
+                    except:
+                        pass
         
         if successful_peers:
             # Track owned files
