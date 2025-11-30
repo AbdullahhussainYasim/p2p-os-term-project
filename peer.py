@@ -1346,40 +1346,83 @@ class Peer:
                     if filename not in self.stored_for_others:
                         return messages.create_error_message("File not found on this peer")
                 
-                owner_ip, owner_port = self.stored_for_others[filename]
+                # Handle both old format (owner_ip, owner_port) and new format (owner_ip, owner_port, owner_id)
+                entry = self.stored_for_others[filename]
+                if len(entry) == 2:
+                    # Old format - migrate to new format
+                    stored_owner_ip, stored_owner_port = entry
+                    stored_owner_id = f"port_{stored_owner_port}"
+                    self.stored_for_others[filename] = (stored_owner_ip, stored_owner_port, stored_owner_id)
+                else:
+                    stored_owner_ip, stored_owner_port, stored_owner_id = entry
             
-            # Verify ownership - use port as primary identifier (handles IP changes)
-            if owner_port != requester_port:
+            # Get requester's peer_id if available
+            requester_id = msg.get("requester_id")
+            
+            # Verify ownership - use peer_id as primary identifier (handles IP/port changes)
+            # Fallback to port for backward compatibility
+            ownership_verified = False
+            if requester_id and stored_owner_id:
+                ownership_verified = (requester_id == stored_owner_id)
+            elif stored_owner_port == requester_port:
+                ownership_verified = True
+                # Update stored_owner_id if we now have it
+                if requester_id:
+                    with self.ownership_lock:
+                        self.stored_for_others[filename] = (stored_owner_ip, stored_owner_port, requester_id)
+                        stored_owner_id = requester_id
+            
+            if not ownership_verified:
                 return messages.create_error_message("Not authorized: You are not the owner of this file")
             
-            # If IP changed but port matches, update the stored info
-            if owner_ip != requester_ip:
-                logger.info(f"IP changed for owner: {owner_ip} -> {requester_ip} (port {owner_port})")
+            # If IP/port changed but peer_id matches, update the stored info
+            if stored_owner_ip != requester_ip or stored_owner_port != requester_port:
+                logger.info(f"Address changed for owner: {stored_owner_ip}:{stored_owner_port} -> {requester_ip}:{requester_port} (peer_id: {stored_owner_id})")
                 with self.ownership_lock:
-                    self.stored_for_others[filename] = (requester_ip, owner_port)
-                    # Rename directory if needed
+                    self.stored_for_others[filename] = (requester_ip, requester_port, stored_owner_id)
+                    # Try to rename directory if needed (search for directory with this owner_id)
                     from pathlib import Path
-                    old_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
-                    new_dir = Path(config.OWNED_STORAGE_DIR) / f"{requester_ip}_{owner_port}"
-                    if old_dir.exists() and not new_dir.exists():
-                        try:
-                            old_dir.rename(new_dir)
-                        except Exception as e:
-                            logger.warning(f"Could not rename directory: {e}")
+                    owned_storage_base = Path(config.OWNED_STORAGE_DIR)
+                    # Find directory with matching owner_id (look for directories containing the owner_id)
+                    for dir_path in owned_storage_base.iterdir():
+                        if dir_path.is_dir() and stored_owner_id[:8] in dir_path.name:
+                            new_dir = owned_storage_base / f"{requester_ip}_{requester_port}_{stored_owner_id[:8]}"
+                            if dir_path != new_dir and not new_dir.exists():
+                                try:
+                                    dir_path.rename(new_dir)
+                                    logger.info(f"Renamed directory: {dir_path.name} -> {new_dir.name}")
+                                except Exception as e:
+                                    logger.warning(f"Could not rename directory: {e}")
+                            break
             
-            # Read encrypted file
+            # Read encrypted file - try multiple directory patterns
             from pathlib import Path
-            owner_dir = Path(config.OWNED_STORAGE_DIR) / f"{requester_ip}_{requester_port}"
-            file_path = owner_dir / filename
+            owned_storage_base = Path(config.OWNED_STORAGE_DIR)
+            file_path = None
             
-            if not file_path.exists():
-                # Try old IP directory as fallback
-                old_dir = Path(config.OWNED_STORAGE_DIR) / f"{owner_ip}_{owner_port}"
-                old_file_path = old_dir / filename
-                if old_file_path.exists():
-                    file_path = old_file_path
-                else:
-                    return messages.create_error_message("File not found on disk")
+            # Try current address with owner_id
+            if stored_owner_id:
+                owner_dir = owned_storage_base / f"{requester_ip}_{requester_port}_{stored_owner_id[:8]}"
+                file_path = owner_dir / filename
+                if not file_path.exists():
+                    # Try old address with owner_id
+                    old_dir = owned_storage_base / f"{stored_owner_ip}_{stored_owner_port}_{stored_owner_id[:8]}"
+                    old_file_path = old_dir / filename
+                    if old_file_path.exists():
+                        file_path = old_file_path
+            
+            # Fallback: try without owner_id (backward compatibility)
+            if not file_path or not file_path.exists():
+                owner_dir = owned_storage_base / f"{requester_ip}_{requester_port}"
+                file_path = owner_dir / filename
+                if not file_path.exists():
+                    old_dir = owned_storage_base / f"{stored_owner_ip}_{stored_owner_port}"
+                    old_file_path = old_dir / filename
+                    if old_file_path.exists():
+                        file_path = old_file_path
+            
+            if not file_path or not file_path.exists():
+                return messages.create_error_message("File not found on disk")
             
             with open(file_path, 'rb') as f:
                 encrypted_data = f.read()
@@ -1418,36 +1461,68 @@ class Peer:
                     if filename not in self.stored_for_others:
                         return messages.create_error_message("File not found on this peer")
                 
-                owner_ip, owner_port = self.stored_for_others[filename]
+                # Handle both old format (owner_ip, owner_port) and new format (owner_ip, owner_port, owner_id)
+                entry = self.stored_for_others[filename]
+                if len(entry) == 2:
+                    # Old format - migrate to new format
+                    stored_owner_ip, stored_owner_port = entry
+                    stored_owner_id = f"port_{stored_owner_port}"
+                    self.stored_for_others[filename] = (stored_owner_ip, stored_owner_port, stored_owner_id)
+                else:
+                    stored_owner_ip, stored_owner_port, stored_owner_id = entry
                 
-                # Verify ownership - use port as primary identifier (handles IP changes)
-                if owner_port != requester_port:
-                    logger.warning(f"Delete request denied: owner port {owner_port} != requester port {requester_port}")
+                # Get requester's peer_id if available
+                requester_id = msg.get("requester_id")
+                
+                # Verify ownership - use peer_id as primary identifier (handles IP/port changes)
+                ownership_verified = False
+                if requester_id and stored_owner_id:
+                    ownership_verified = (requester_id == stored_owner_id)
+                elif stored_owner_port == requester_port:
+                    ownership_verified = True
+                
+                if not ownership_verified:
+                    logger.warning(f"Delete request denied: owner {stored_owner_id or stored_owner_port} != requester {requester_id or requester_port}")
                     return messages.create_error_message("Not authorized: You are not the owner of this file")
                 
-                # Delete the file from disk
+                # Delete the file from disk - try multiple directory patterns
                 from pathlib import Path
                 owned_storage_base = Path(config.OWNED_STORAGE_DIR)
-                owner_dir = owned_storage_base / f"{owner_ip}_{owner_port}"
-                file_path = owner_dir / filename
+                file_path = None
                 
-                if not file_path.exists():
-                    # Try with requester_ip in case IP changed
+                # Try with owner_id if available
+                if stored_owner_id:
+                    owner_dir = owned_storage_base / f"{requester_ip}_{requester_port}_{stored_owner_id[:8]}"
+                    file_path = owner_dir / filename
+                    if not file_path.exists():
+                        # Try old address
+                        old_dir = owned_storage_base / f"{stored_owner_ip}_{stored_owner_port}_{stored_owner_id[:8]}"
+                        old_file_path = old_dir / filename
+                        if old_file_path.exists():
+                            file_path = old_file_path
+                
+                # Fallback: try without owner_id (backward compatibility)
+                if not file_path or not file_path.exists():
                     owner_dir = owned_storage_base / f"{requester_ip}_{requester_port}"
                     file_path = owner_dir / filename
+                    if not file_path.exists():
+                        old_dir = owned_storage_base / f"{stored_owner_ip}_{stored_owner_port}"
+                        old_file_path = old_dir / filename
+                        if old_file_path.exists():
+                            file_path = old_file_path
                 
-                if file_path.exists():
+                if file_path and file_path.exists():
                     file_path.unlink()
-                    logger.info(f"Deleted owned file {filename} for {owner_ip}:{owner_port}")
+                    logger.info(f"Deleted owned file {filename} for {stored_owner_id} ({stored_owner_ip}:{stored_owner_port})")
                     
                     # Remove from metadata
                     del self.stored_for_others[filename]
                     
                     # If directory is empty, remove it
                     try:
-                        if owner_dir.exists() and not any(owner_dir.iterdir()):
-                            owner_dir.rmdir()
-                            logger.debug(f"Removed empty owner directory: {owner_dir}")
+                        if file_path.parent.exists() and not any(file_path.parent.iterdir()):
+                            file_path.parent.rmdir()
+                            logger.debug(f"Removed empty owner directory: {file_path.parent}")
                     except:
                         pass
                     
