@@ -173,10 +173,22 @@ class Tracker:
             response = self._process_message(msg, address)
             
             if response:
-                logger.debug(f"Sending response for {msg_type} to {address}")
-                self._send_message(client_socket, messages.serialize_message(response))
+                logger.info(f"Sending response for {msg_type} to {address}, response type: {response.get('type')}")
+                try:
+                    serialized = messages.serialize_message(response)
+                    logger.debug(f"Serialized response size: {len(serialized)} bytes")
+                    self._send_message(client_socket, serialized)
+                    logger.info(f"Response sent successfully for {msg_type} to {address}")
+                except Exception as e:
+                    logger.error(f"Error sending response for {msg_type} to {address}: {e}", exc_info=True)
             else:
                 logger.warning(f"No response generated for {msg_type} from {address}")
+                # Send error response if no response was generated
+                try:
+                    error_response = messages.create_error_message(f"No response generated for {msg_type}")
+                    self._send_message(client_socket, messages.serialize_message(error_response))
+                except:
+                    pass
         
         except Exception as e:
             logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -398,54 +410,68 @@ class Tracker:
             logger.warning("FIND_OWNED_FILE: requester_port missing")
             return messages.create_error_message("Requester port required")
         
-        with self.lock:
-            if filename not in self.owned_file_registry:
-                logger.warning(f"FIND_OWNED_FILE: File {filename} not found in registry (total files: {len(self.owned_file_registry)})")
-                return messages.create_message(
-                    messages.MessageType.OWNED_FILE_RESPONSE,
-                    filename=filename,
-                    found=False,
-                    error="File not found"
-                )
+        try:
+            with self.lock:
+                logger.debug(f"Checking registry for {filename}. Total files in registry: {len(self.owned_file_registry)}")
+                if filename not in self.owned_file_registry:
+                    logger.warning(f"FIND_OWNED_FILE: File {filename} not found in registry (total files: {len(self.owned_file_registry)})")
+                    logger.debug(f"Files in registry: {list(self.owned_file_registry.keys())}")
+                    return messages.create_message(
+                        messages.MessageType.OWNED_FILE_RESPONSE,
+                        filename=filename,
+                        found=False,
+                        error="File not found"
+                    )
+                
+                owner_key, storage_peers = self.owned_file_registry[filename]
+                logger.debug(f"Found file {filename}: owner={owner_key}, storage_peers={storage_peers}")
+                
+                # Verify ownership - use port as primary identifier (handles IP changes)
+                if owner_key[1] != requester_port:
+                    logger.warning(f"Ownership mismatch: owner port {owner_key[1]} != requester port {requester_port}")
+                    return messages.create_message(
+                        messages.MessageType.OWNED_FILE_RESPONSE,
+                        filename=filename,
+                        found=False,
+                        error="Not authorized: You are not the owner of this file"
+                    )
+                
+                # If IP changed but port matches, update the ownership record
+                if owner_key[0] != requester_ip:
+                    logger.info(f"IP changed for owner: {owner_key[0]}:{owner_key[1]} -> {requester_ip}:{requester_port}")
+                    new_owner_key = (requester_ip, requester_port)
+                    self.owned_file_registry[filename] = (new_owner_key, storage_peers)
+                    owner_key = new_owner_key
+                    self._save_ownership_state()
+                
+                # Filter to only alive storage peers
+                alive_storage_peers = []
+                for storage_key in storage_peers:
+                    if storage_key in self.peers and self.peers[storage_key].is_alive(config.PEER_TIMEOUT):
+                        alive_storage_peers.append({"ip": storage_key[0], "port": storage_key[1]})
+                    else:
+                        logger.debug(f"Storage peer {storage_key} is not alive or not registered")
+                
+                logger.info(f"Found {len(alive_storage_peers)} alive storage peers for {filename}")
+                
+                # Update registry if some peers are dead
+                if len(alive_storage_peers) < len(storage_peers):
+                    self.owned_file_registry[filename] = (owner_key, [(p["ip"], p["port"]) for p in alive_storage_peers])
+                    self._save_ownership_state()
             
-            owner_key, storage_peers = self.owned_file_registry[filename]
-            
-            # Verify ownership - use port as primary identifier (handles IP changes)
-            if owner_key[1] != requester_port:
-                return messages.create_message(
-                    messages.MessageType.OWNED_FILE_RESPONSE,
-                    filename=filename,
-                    found=False,
-                    error="Not authorized: You are not the owner of this file"
-                )
-            
-            # If IP changed but port matches, update the ownership record
-            if owner_key[0] != requester_ip:
-                logger.info(f"IP changed for owner: {owner_key[0]}:{owner_key[1]} -> {requester_ip}:{requester_port}")
-                new_owner_key = (requester_ip, requester_port)
-                self.owned_file_registry[filename] = (new_owner_key, storage_peers)
-                owner_key = new_owner_key
-                self._save_ownership_state()
-            
-            # Filter to only alive storage peers
-            alive_storage_peers = []
-            for storage_key in storage_peers:
-                if storage_key in self.peers and self.peers[storage_key].is_alive(config.PEER_TIMEOUT):
-                    alive_storage_peers.append({"ip": storage_key[0], "port": storage_key[1]})
-            
-            # Update registry if some peers are dead
-            if len(alive_storage_peers) < len(storage_peers):
-                self.owned_file_registry[filename] = (owner_key, [(p["ip"], p["port"]) for p in alive_storage_peers])
-                self._save_ownership_state()
-        
-        return messages.create_message(
-            messages.MessageType.OWNED_FILE_RESPONSE,
-            filename=filename,
-            found=len(alive_storage_peers) > 0,
-            owner_ip=owner_key[0],
-            owner_port=owner_key[1],
-            storage_peers=alive_storage_peers
-        )
+            response = messages.create_message(
+                messages.MessageType.OWNED_FILE_RESPONSE,
+                filename=filename,
+                found=len(alive_storage_peers) > 0,
+                owner_ip=owner_key[0],
+                owner_port=owner_key[1],
+                storage_peers=alive_storage_peers
+            )
+            logger.info(f"Sending OWNED_FILE_RESPONSE for {filename}: found={len(alive_storage_peers) > 0}, peers={len(alive_storage_peers)}")
+            return response
+        except Exception as e:
+            logger.error(f"Error in _handle_find_owned_file: {e}", exc_info=True)
+            return messages.create_error_message(f"Error finding owned file: {e}")
     
     def _handle_report_owned_files(self, msg: Dict, address: Tuple[str, int]) -> Dict:
         """Handle storage peer reporting what owned files it has."""

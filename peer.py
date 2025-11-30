@@ -1636,11 +1636,15 @@ class Peer:
             logger.debug("Waiting for response from tracker...")
             data = self._receive_message(sock)
             if data:
-                response = messages.deserialize_message(data)
-                logger.debug(f"Received response from tracker: type={response.get('type')}")
-                return response
+                try:
+                    response = messages.deserialize_message(data)
+                    logger.debug(f"Received response from tracker: type={response.get('type')}, status={response.get('status')}")
+                    return response
+                except Exception as e:
+                    logger.error(f"Error deserializing tracker response: {e}", exc_info=True)
+                    return None
             else:
-                logger.warning("No data received from tracker")
+                logger.warning("No data received from tracker (socket closed or timeout)")
                 return None
         except socket.timeout:
             logger.error(f"Timeout communicating with tracker at {self.tracker_host}:{self.tracker_port}")
@@ -1657,22 +1661,40 @@ class Peer:
     def _receive_message(self, sock: socket.socket) -> Optional[bytes]:
         """Receive a complete message from socket."""
         try:
-            length_data = sock.recv(4)
-            if len(length_data) < 4:
-                return None
+            # Receive length prefix (4 bytes)
+            length_data = b''
+            while len(length_data) < 4:
+                chunk = sock.recv(4 - len(length_data))
+                if not chunk:
+                    logger.debug("Socket closed while receiving length prefix")
+                    return None
+                length_data += chunk
             
             message_length = int.from_bytes(length_data, 'big')
+            logger.debug(f"Expecting message of length {message_length} bytes")
             
+            if message_length > config.BUFFER_SIZE * 10:  # Sanity check
+                logger.error(f"Message length too large: {message_length}")
+                return None
+            
+            # Receive the actual message
             data = b''
             while len(data) < message_length:
-                chunk = sock.recv(min(message_length - len(data), config.BUFFER_SIZE))
+                remaining = message_length - len(data)
+                chunk_size = min(remaining, config.BUFFER_SIZE)
+                chunk = sock.recv(chunk_size)
                 if not chunk:
+                    logger.debug(f"Socket closed while receiving message data (received {len(data)}/{message_length} bytes)")
                     return None
                 data += chunk
             
+            logger.debug(f"Received complete message: {len(data)} bytes")
             return data
+        except socket.timeout:
+            logger.debug("Timeout while receiving message")
+            return None
         except Exception as e:
-            logger.debug(f"Error receiving message: {e}")
+            logger.debug(f"Error receiving message: {e}", exc_info=True)
             return None
     
     def _send_message(self, sock: socket.socket, data: bytes):
