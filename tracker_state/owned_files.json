@@ -1,9 +1,9 @@
 {
   "restart.png": {
     "owner": {
-      "ip": "192.168.0.112",
+      "ip": "10.58.215.167",
       "port": 9001,
-      "peer_id": "port_9001"
+      "peer_id": "d2a48163-e0a1-4ba5-9245-9eb015699e71"
     },
     "storage": [
       {
