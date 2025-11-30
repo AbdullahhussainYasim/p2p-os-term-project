@@ -442,7 +442,9 @@ class Tracker:
             alive_storage_peers = []
             owner_key = None
             
+            logger.info(f"Acquiring lock for FIND_OWNED_FILE: {filename}")
             with self.lock:
+                logger.info(f"Lock acquired for FIND_OWNED_FILE: {filename}")
                 logger.debug(f"Checking registry for {filename}. Total files in registry: {len(self.owned_file_registry)}")
                 logger.debug(f"Files in registry: {list(self.owned_file_registry.keys())}")
                 
@@ -457,10 +459,12 @@ class Tracker:
                     logger.info(f"Returning response: file not found")
                     return response
                 
+                logger.info(f"File {filename} found in registry, extracting owner and storage peers...")
                 owner_key, storage_peers = self.owned_file_registry[filename]
                 logger.info(f"Found file {filename}: owner={owner_key}, storage_peers={storage_peers}")
                 
                 # Verify ownership - use port as primary identifier (handles IP changes)
+                logger.info(f"Verifying ownership: owner port {owner_key[1]} vs requester port {requester_port}")
                 if owner_key[1] != requester_port:
                     logger.warning(f"Ownership mismatch: owner port {owner_key[1]} != requester port {requester_port}")
                     response = messages.create_message(
@@ -481,18 +485,26 @@ class Tracker:
                     # Don't save state here - do it after response is sent to avoid blocking
                 
                 # Filter to only alive storage peers
+                logger.info(f"Filtering {len(storage_peers)} storage peers for {filename}...")
                 for storage_key in storage_peers:
-                    if storage_key in self.peers and self.peers[storage_key].is_alive(config.PEER_TIMEOUT):
-                        alive_storage_peers.append({"ip": storage_key[0], "port": storage_key[1]})
+                    logger.debug(f"Checking storage peer {storage_key}...")
+                    if storage_key in self.peers:
+                        is_alive = self.peers[storage_key].is_alive(config.PEER_TIMEOUT)
+                        logger.debug(f"Storage peer {storage_key} is_alive={is_alive}")
+                        if is_alive:
+                            alive_storage_peers.append({"ip": storage_key[0], "port": storage_key[1]})
                     else:
-                        logger.debug(f"Storage peer {storage_key} is not alive or not registered")
+                        logger.debug(f"Storage peer {storage_key} not in self.peers")
                 
                 logger.info(f"Found {len(alive_storage_peers)} alive storage peers for {filename}")
                 
                 # Update registry if some peers are dead
                 if len(alive_storage_peers) < len(storage_peers):
+                    logger.info(f"Updating registry: removing dead peers for {filename}")
                     self.owned_file_registry[filename] = (owner_key, [(p["ip"], p["port"]) for p in alive_storage_peers])
                     # Don't save state here - do it after response is sent to avoid blocking
+                
+                logger.info(f"Releasing lock for FIND_OWNED_FILE: {filename}")
             
             # Create response outside the lock (to avoid holding lock while creating response)
             if owner_key is None:
