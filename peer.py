@@ -230,7 +230,8 @@ class Peer:
             logger.debug(f"Error unregistering from tracker: {e}")
     
     def _heartbeat_loop(self):
-        """Periodically update tracker with current load."""
+        """Periodically update tracker with current load and report owned files."""
+        report_counter = 0
         while self.running:
             time.sleep(config.HEARTBEAT_INTERVAL)
             
@@ -243,6 +244,13 @@ class Peer:
                     cpu_load=current_load
                 )
                 self._send_to_tracker(msg)
+                
+                # Periodically report owned files (every 5 heartbeats = ~50 seconds)
+                # This helps rebuild tracker registry if it restarted
+                report_counter += 1
+                if report_counter >= 5:
+                    self._report_owned_files_to_tracker()
+                    report_counter = 0
             except Exception as e:
                 logger.debug(f"Error sending heartbeat: {e}")
     
@@ -258,7 +266,7 @@ class Peer:
             
             logger.debug(f"Received {msg_type} from {address}")
             
-            response = self._process_message(msg)
+            response = self._process_message(msg, address)
             
             if response:
                 self._send_message(client_socket, messages.serialize_message(response))
@@ -1532,6 +1540,30 @@ class Peer:
             self._send_to_tracker(msg)
         except Exception as e:
             logger.debug(f"Failed to register owned file with tracker: {e}")
+    
+    def _report_owned_files_to_tracker(self):
+        """Report all owned files stored on this peer to tracker (for registry recovery)."""
+        try:
+            with self.ownership_lock:
+                owned_files_list = []
+                for filename, (owner_ip, owner_port) in self.stored_for_others.items():
+                    owned_files_list.append({
+                        "filename": filename,
+                        "owner_ip": owner_ip,
+                        "owner_port": owner_port
+                    })
+            
+            if owned_files_list:
+                msg = messages.create_message(
+                    messages.MessageType.REPORT_OWNED_FILES,
+                    storage_ip=self.peer_ip,
+                    storage_port=self.peer_port,
+                    owned_files=owned_files_list
+                )
+                self._send_to_tracker(msg)
+                logger.debug(f"Reported {len(owned_files_list)} owned files to tracker")
+        except Exception as e:
+            logger.debug(f"Failed to report owned files to tracker: {e}")
     
     def _send_to_tracker(self, msg: Dict) -> Optional[Dict]:
         """Send a message to the tracker and return response."""
