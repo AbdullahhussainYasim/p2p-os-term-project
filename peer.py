@@ -9,6 +9,7 @@ import logging
 import time
 import base64
 import os
+import uuid
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple, Any
 from datetime import datetime
@@ -100,9 +101,35 @@ class Peer:
         # Owned file tracking
         # Files owned by this peer: filename -> [storage_peer_addresses]
         self.owned_files: Dict[str, List[Tuple[str, int]]] = {}
-        # Files stored for other peers: filename -> (owner_ip, owner_port)
-        self.stored_for_others: Dict[str, Tuple[str, int]] = {}
+        # Files stored for other peers: filename -> (owner_ip, owner_port, owner_id)
+        self.stored_for_others: Dict[str, Tuple[str, int, str]] = {}  # Added owner_id
         self.ownership_lock = threading.Lock()
+        
+        # Persistent peer ID (survives IP/port changes)
+        self.peer_id = self._load_or_create_peer_id()
+        logger.info(f"Peer ID: {self.peer_id}")
+    
+    def _load_or_create_peer_id(self) -> str:
+        """Load existing peer ID from disk or create a new one."""
+        peer_id_file = Path(config.PEER_ID_FILE)
+        try:
+            if peer_id_file.exists():
+                peer_id = peer_id_file.read_text().strip()
+                if peer_id and len(peer_id) == 36:  # UUID format
+                    logger.info(f"Loaded existing peer ID: {peer_id}")
+                    return peer_id
+        except Exception as e:
+            logger.warning(f"Failed to load peer ID: {e}")
+        
+        # Create new peer ID
+        new_peer_id = str(uuid.uuid4())
+        try:
+            peer_id_file.write_text(new_peer_id)
+            logger.info(f"Created new peer ID: {new_peer_id}")
+        except Exception as e:
+            logger.error(f"Failed to save peer ID: {e}")
+        
+        return new_peer_id
     
     def _get_local_ip(self) -> str:
         """Get local IP address for external connections."""
@@ -195,7 +222,8 @@ class Peer:
                 ip=current_ip,
                 port=self.peer_port,
                 cpu_load=self.scheduler.get_load(),
-                old_ip=self.old_peer_ip if self.old_peer_ip else None
+                old_ip=self.old_peer_ip if self.old_peer_ip else None,
+                peer_id=self.peer_id  # Include persistent peer ID
             )
             
             response = self._send_to_tracker(msg)
@@ -1258,12 +1286,17 @@ class Peer:
             os.chmod(file_path, 0o600)
             os.chmod(owner_dir, 0o700)
             
-            # Track this file
+            # Get owner_id from message
+            owner_id = msg.get("owner_id")
+            if not owner_id:
+                owner_id = f"port_{owner_port}"  # Fallback
+            
+            # Track this file (include owner_id)
             with self.ownership_lock:
-                self.stored_for_others[filename] = (owner_ip, owner_port)
+                self.stored_for_others[filename] = (owner_ip, owner_port, owner_id)
             
             # Register with tracker (owner is the one who uploaded, storage is this peer)
-            logger.debug(f"Registering file with tracker: owner={owner_ip}:{owner_port}, storage={self.peer_ip}:{self.peer_port}")
+            logger.debug(f"Registering file with tracker: owner={owner_id} ({owner_ip}:{owner_port}), storage={self.peer_ip}:{self.peer_port}")
             # Note: We need to send a message to tracker with correct owner info
             # The storage peer registers the file, but owner info comes from the upload message
             try:
@@ -1272,6 +1305,7 @@ class Peer:
                     filename=filename,
                     owner_ip=owner_ip,  # Actual owner who uploaded
                     owner_port=owner_port,  # Actual owner port
+                    owner_id=owner_id,  # Include owner_id
                     storage_ip=self.peer_ip,  # This peer is the storage
                     storage_port=self.peer_port
                 )

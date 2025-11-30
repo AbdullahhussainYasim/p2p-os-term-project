@@ -21,12 +21,13 @@ logger = logging.getLogger(__name__)
 class PeerInfo:
     """Information about a registered peer."""
     
-    def __init__(self, ip: str, port: int, initial_load: float = 0.0):
+    def __init__(self, ip: str, port: int, initial_load: float = 0.0, peer_id: str = None):
         self.ip = ip
         self.port = port
         self.cpu_load = initial_load
         self.last_update = datetime.now()
         self.registered_at = datetime.now()
+        self.peer_id = peer_id  # Persistent peer ID
     
     def update_load(self, load: float):
         """Update peer's CPU load and timestamp."""
@@ -64,12 +65,14 @@ class Tracker:
         self.host = host or config.DEFAULT_TRACKER_HOST
         self.port = port or config.DEFAULT_TRACKER_PORT
         self.peers: Dict[Tuple[str, int], PeerInfo] = {}  # (ip, port) -> PeerInfo
+        self.peers_by_id: Dict[str, Tuple[str, int]] = {}  # peer_id -> (ip, port) mapping
         self.file_registry: Dict[str, List[Tuple[str, int]]] = {}  # filename -> [(ip, port), ...]
         
-        # Owned file tracking: filename -> (owner_peer, [(storage_peer_ip, storage_peer_port), ...])
-        # owner_peer is (ip, port) tuple
+        # Owned file tracking: filename -> (owner_peer_id, owner_address, [(storage_peer_ip, storage_peer_port), ...])
+        # owner_peer_id is the persistent peer ID
+        # owner_address is (ip, port) tuple (for backward compatibility and current location)
         # storage_peers is list of (ip, port) tuples where file is stored
-        self.owned_file_registry: Dict[str, Tuple[Tuple[str, int], List[Tuple[str, int]]]] = {}
+        self.owned_file_registry: Dict[str, Tuple[str, Tuple[str, int], List[Tuple[str, int]]]] = {}
         
         # Persistence
         self.state_dir = Path("tracker_state")
@@ -264,6 +267,8 @@ class Tracker:
         ip = msg.get("ip", address[0])
         port = msg.get("port")
         cpu_load = msg.get("cpu_load", 0.0)
+        peer_id = msg.get("peer_id")
+        old_ip = msg.get("old_ip")
         
         if not port:
             return messages.create_error_message("Port required for registration")
@@ -271,14 +276,47 @@ class Tracker:
         peer_key = (ip, port)
         
         with self.lock:
-            if peer_key in self.peers:
-                # Update existing peer
+            # If peer_id is provided, check if this peer already exists with different IP/port
+            if peer_id and peer_id in self.peers_by_id:
+                old_key = self.peers_by_id[peer_id]
+                if old_key != peer_key:
+                    # Peer changed IP/port - update registry
+                    logger.info(f"Peer {peer_id} changed address: {old_key} -> {peer_key}")
+                    # Update peer info
+                    if old_key in self.peers:
+                        old_peer_info = self.peers[old_key]
+                        old_peer_info.ip = ip
+                        old_peer_info.port = port
+                        old_peer_info.update_load(cpu_load)
+                        # Move to new key
+                        del self.peers[old_key]
+                        self.peers[peer_key] = old_peer_info
+                    else:
+                        self.peers[peer_key] = PeerInfo(ip, port, cpu_load, peer_id)
+                    
+                    # Update owned file registry to use new address
+                    self._update_peer_address_in_registry(peer_id, old_key, peer_key)
+                    logger.info(f"Updated peer registration: {ip}:{port} (load: {cpu_load}, peer_id: {peer_id})")
+                else:
+                    # Same address, just update load
+                    if peer_key in self.peers:
+                        self.peers[peer_key].update_load(cpu_load)
+                    else:
+                        self.peers[peer_key] = PeerInfo(ip, port, cpu_load, peer_id)
+                    logger.info(f"Updated peer registration: {ip}:{port} (load: {cpu_load})")
+            elif peer_key in self.peers:
+                # Update existing peer (no peer_id or new registration)
                 self.peers[peer_key].update_load(cpu_load)
+                if peer_id:
+                    self.peers[peer_key].peer_id = peer_id
+                    self.peers_by_id[peer_id] = peer_key
                 logger.info(f"Updated peer registration: {ip}:{port} (load: {cpu_load})")
             else:
                 # New peer
-                self.peers[peer_key] = PeerInfo(ip, port, cpu_load)
-                logger.info(f"New peer registered: {ip}:{port} (load: {cpu_load})")
+                self.peers[peer_key] = PeerInfo(ip, port, cpu_load, peer_id)
+                if peer_id:
+                    self.peers_by_id[peer_id] = peer_key
+                logger.info(f"New peer registered: {ip}:{port} (load: {cpu_load}, peer_id: {peer_id})")
         
         return messages.create_status_message("REGISTERED", {"peer_count": len(self.peers)})
     
@@ -464,13 +502,37 @@ class Tracker:
                     return response
                 
                 logger.info(f"File {filename} found in registry, extracting owner and storage peers...")
-                owner_key, storage_peers = self.owned_file_registry[filename]
-                logger.info(f"Found file {filename}: owner={owner_key}, storage_peers={storage_peers}")
+                owner_id, owner_key, storage_peers = self.owned_file_registry[filename]
+                logger.info(f"Found file {filename}: owner_id={owner_id}, owner={owner_key}, storage_peers={storage_peers}")
                 
-                # Verify ownership - use port as primary identifier (handles IP changes)
-                logger.info(f"Verifying ownership: owner port {owner_key[1]} vs requester port {requester_port}")
-                if owner_key[1] != requester_port:
+                # Get requester's peer_id if available
+                requester_id = msg.get("requester_id")
+                if not requester_id:
+                    requester_key = (requester_ip, requester_port)
+                    if requester_key in self.peers and self.peers[requester_key].peer_id:
+                        requester_id = self.peers[requester_key].peer_id
+                
+                # Verify ownership - use peer_id as primary identifier (handles IP/port changes)
+                # Fallback to port if peer_id not available (backward compatibility)
+                ownership_verified = False
+                if requester_id and owner_id:
+                    if owner_id == requester_id:
+                        ownership_verified = True
+                        logger.info(f"Ownership verified by peer_id: {owner_id}")
+                    else:
+                        logger.warning(f"Ownership mismatch: owner_id {owner_id} != requester_id {requester_id}")
+                elif owner_key[1] == requester_port:
+                    # Fallback: verify by port (backward compatibility)
+                    ownership_verified = True
+                    logger.info(f"Ownership verified by port: {owner_key[1]}")
+                    # Update owner_id if we now have it
+                    if requester_id:
+                        self.owned_file_registry[filename] = (requester_id, owner_key, storage_peers)
+                        owner_id = requester_id
+                else:
                     logger.warning(f"Ownership mismatch: owner port {owner_key[1]} != requester port {requester_port}")
+                
+                if not ownership_verified:
                     response = messages.create_message(
                         messages.MessageType.OWNED_FILE_RESPONSE,
                         filename=filename,
@@ -480,11 +542,11 @@ class Tracker:
                     logger.info(f"Returning response: not authorized")
                     return response
                 
-                # If IP changed but port matches, update the ownership record
-                if owner_key[0] != requester_ip:
-                    logger.info(f"IP changed for owner: {owner_key[0]}:{owner_key[1]} -> {requester_ip}:{requester_port}")
+                # If IP/port changed but peer_id matches, update the ownership record
+                if owner_key[0] != requester_ip or owner_key[1] != requester_port:
+                    logger.info(f"Address changed for owner: {owner_key} -> ({requester_ip}:{requester_port})")
                     new_owner_key = (requester_ip, requester_port)
-                    self.owned_file_registry[filename] = (new_owner_key, storage_peers)
+                    self.owned_file_registry[filename] = (owner_id, new_owner_key, storage_peers)
                     owner_key = new_owner_key
                     # Don't save state here - do it after response is sent to avoid blocking
                 
@@ -505,7 +567,7 @@ class Tracker:
                 # Update registry if some peers are dead
                 if len(alive_storage_peers) < len(storage_peers):
                     logger.info(f"Updating registry: removing dead peers for {filename}")
-                    self.owned_file_registry[filename] = (owner_key, [(p["ip"], p["port"]) for p in alive_storage_peers])
+                    self.owned_file_registry[filename] = (owner_id, owner_key, [(p["ip"], p["port"]) for p in alive_storage_peers])
                     # Don't save state here - do it after response is sent to avoid blocking
                 
                 logger.info(f"Releasing lock for FIND_OWNED_FILE: {filename}")
@@ -521,9 +583,10 @@ class Tracker:
                 found=len(alive_storage_peers) > 0,
                 owner_ip=owner_key[0],
                 owner_port=owner_key[1],
+                owner_id=owner_id,  # Include owner_id in response
                 storage_peers=alive_storage_peers
             )
-            logger.info(f"Created OWNED_FILE_RESPONSE for {filename}: found={len(alive_storage_peers) > 0}, peers={len(alive_storage_peers)}, owner={owner_key}")
+            logger.info(f"Created OWNED_FILE_RESPONSE for {filename}: found={len(alive_storage_peers) > 0}, peers={len(alive_storage_peers)}, owner_id={owner_id}, owner={owner_key}")
             return response
         except Exception as e:
             logger.error(f"Error in _handle_find_owned_file: {e}", exc_info=True)
