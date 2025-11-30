@@ -82,6 +82,10 @@ class Tracker:
         # Load persisted ownership records
         self._load_ownership_state()
         
+        # Rebuild peers_by_id from owned_file_registry after loading
+        # This helps track which peer_ids have files even if peers haven't re-registered yet
+        self._rebuild_peers_by_id_from_registry()
+        
         self.lock = threading.RLock()  # Use reentrant lock to allow nested locking
         self.running = False
         self.server_socket: Optional[socket.socket] = None
@@ -314,13 +318,43 @@ class Tracker:
                 # Update existing peer (no peer_id or new registration)
                 self.peers[peer_key].update_load(cpu_load)
                 if peer_id:
-                    self.peers[peer_key].peer_id = peer_id
-                    self.peers_by_id[peer_id] = peer_key
+                    # Check if this peer_id already has files in registry with different address
+                    old_peer_id_key = self.peers_by_id.get(peer_id)
+                    if old_peer_id_key and old_peer_id_key != peer_key:
+                        # Peer re-registered with new address - update registry
+                        logger.info(f"Peer {peer_id} re-registered with new address: {old_peer_id_key} -> {peer_key}")
+                        self.peers_by_id[peer_id] = peer_key
+                        # Update owned file registry addresses
+                        self._upgrade_owner_id_in_registry(peer_id, port)
+                        self._update_peer_address_in_registry(peer_id, old_peer_id_key, peer_key)
+                    else:
+                        self.peers_by_id[peer_id] = peer_key
                 logger.info(f"Updated peer registration: {ip}:{port} (load: {cpu_load})")
             else:
-                # New peer
+                # New peer registration
                 self.peers[peer_key] = PeerInfo(ip, port, cpu_load, peer_id)
                 if peer_id:
+                    # Check if this peer_id already has files in registry (from previous session)
+                    # If so, update the addresses in the registry
+                    old_peer_id_key = self.peers_by_id.get(peer_id)
+                    if old_peer_id_key and old_peer_id_key != peer_key:
+                        logger.info(f"Peer {peer_id} re-registered after tracker restart: {old_peer_id_key} -> {peer_key}")
+                        # Update owned file registry addresses
+                        self._upgrade_owner_id_in_registry(peer_id, port)
+                        self._update_peer_address_in_registry(peer_id, old_peer_id_key, peer_key)
+                    else:
+                        # Check if this peer_id has files in registry but wasn't in peers_by_id
+                        # (happens when tracker restarts and peers_by_id was rebuilt from registry)
+                        # Always update owner addresses to ensure they're current
+                        registry_addr = self._find_peer_address_in_registry(peer_id)
+                        if registry_addr and registry_addr != peer_key:
+                            logger.info(f"Peer {peer_id} re-registered with new address (from registry): {registry_addr} -> {peer_key}")
+                        else:
+                            logger.info(f"Peer {peer_id} re-registered (updating owner addresses in registry)")
+                        # Always upgrade owner_id and update addresses when peer re-registers
+                        # This ensures addresses are current after tracker restart
+                        self._upgrade_owner_id_in_registry(peer_id, port)
+                        self._update_peer_address_in_registry(peer_id, (None, None), peer_key)
                     self.peers_by_id[peer_id] = peer_key
                 logger.info(f"New peer registered: {ip}:{port} (load: {cpu_load}, peer_id: {peer_id})")
         
@@ -456,6 +490,30 @@ class Tracker:
         else:
             raise ValueError(f"Unexpected registry entry format: {entry}")
     
+    def _rebuild_peers_by_id_from_registry(self):
+        """Rebuild peers_by_id mapping from owned_file_registry after loading from disk.
+        This helps track which peer_ids have files even if peers haven't re-registered yet.
+        """
+        for filename in self.owned_file_registry.keys():
+            entry = self.owned_file_registry[filename]
+            owner_id, owner_addr, storage_peers = self._normalize_registry_entry(entry)
+            
+            # If owner_id is a real peer_id (not port_XXX), add it to peers_by_id
+            if owner_id and not owner_id.startswith("port_"):
+                # Only add if not already present (preserve existing mappings)
+                if owner_id not in self.peers_by_id:
+                    self.peers_by_id[owner_id] = owner_addr
+                    logger.debug(f"Rebuilt peers_by_id entry: {owner_id} -> {owner_addr} from registry")
+    
+    def _find_peer_address_in_registry(self, peer_id: str) -> Optional[Tuple[str, int]]:
+        """Find the address of a peer_id in the owned_file_registry."""
+        for filename in self.owned_file_registry.keys():
+            entry = self.owned_file_registry[filename]
+            owner_id, owner_addr, storage_peers = self._normalize_registry_entry(entry)
+            if owner_id == peer_id:
+                return owner_addr
+        return None
+    
     def _update_peer_address_in_registry(self, peer_id: str, old_key: Tuple[str, int], new_key: Tuple[str, int]):
         """Update peer address in owned file registry when IP/port changes."""
         updated_count = 0
@@ -470,18 +528,19 @@ class Tracker:
                     updated_count += 1
                     logger.info(f"Updated owner address for {filename}: {owner_addr} -> {new_key}")
             
-            # Update storage peers if they match
-            new_storage = []
-            storage_updated = False
-            for storage_key in storage_peers:
-                if storage_key == old_key:
-                    new_storage.append(new_key)
-                    storage_updated = True
-                    updated_count += 1
-                else:
-                    new_storage.append(storage_key)
-            if storage_updated:
-                self.owned_file_registry[filename] = (owner_id, owner_addr, new_storage)
+            # Update storage peers if they match old_key (skip if old_key is dummy (None, None))
+            if old_key[0] is not None and old_key[1] is not None:
+                new_storage = []
+                storage_updated = False
+                for storage_key in storage_peers:
+                    if storage_key == old_key:
+                        new_storage.append(new_key)
+                        storage_updated = True
+                        updated_count += 1
+                    else:
+                        new_storage.append(storage_key)
+                if storage_updated:
+                    self.owned_file_registry[filename] = (owner_id, owner_addr, new_storage)
         
         if updated_count > 0:
             self._save_ownership_state()
