@@ -249,6 +249,8 @@ class Tracker:
                 return self._handle_report_owned_files(msg, address)
             elif msg_type == messages.MessageType.LIST_OWNED_FILES:
                 return self._handle_list_owned_files(msg, address)
+            elif msg_type == messages.MessageType.DELETE_OWNED_FILE:
+                return self._handle_delete_owned_file(msg, address)
             elif msg_type == messages.MessageType.STATUS:
                 return self._handle_status()
             else:
@@ -600,6 +602,39 @@ class Tracker:
         except Exception as e:
             logger.error(f"Error in _handle_list_owned_files: {e}", exc_info=True)
             return messages.create_error_message(f"Error listing owned files: {e}")
+    
+    def _handle_delete_owned_file(self, msg: Dict, address: Tuple[str, int]) -> Dict:
+        """Handle request to delete an owned file from the registry."""
+        filename = msg.get("filename")
+        owner_ip = msg.get("owner_ip", address[0])
+        owner_port = msg.get("owner_port")
+        
+        if not filename:
+            return messages.create_error_message("Filename required")
+        if not owner_port:
+            return messages.create_error_message("Owner port required")
+        
+        try:
+            with self.lock:
+                if filename not in self.owned_file_registry:
+                    logger.warning(f"DELETE_OWNED_FILE: File {filename} not found in registry")
+                    return messages.create_status_message("OK", {"filename": filename, "deleted": False, "message": "File not in registry"})
+                
+                owner_key, storage_peers = self.owned_file_registry[filename]
+                
+                # Verify ownership
+                if owner_key[1] != owner_port:
+                    return messages.create_error_message("Not authorized: You are not the owner of this file")
+                
+                # Remove from registry
+                del self.owned_file_registry[filename]
+                self._save_ownership_state()
+                
+                logger.info(f"Deleted owned file {filename} from registry (owned by {owner_ip}:{owner_port})")
+                return messages.create_status_message("OK", {"filename": filename, "deleted": True})
+        except Exception as e:
+            logger.error(f"Error in _handle_delete_owned_file: {e}", exc_info=True)
+            return messages.create_error_message(f"Error deleting owned file: {e}")
     
     def _load_ownership_state(self):
         """Load persisted ownership records from disk."""

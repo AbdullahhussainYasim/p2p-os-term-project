@@ -551,6 +551,36 @@ def list_owned_files():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/file/delete-owned', methods=['POST'])
+def delete_owned_file():
+    """Delete an owned file from storage peers."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        data = request.json
+        filename = data.get("filename")
+        
+        if not filename:
+            return jsonify({"error": "filename required"}), 400
+        
+        result = peer_instance.delete_owned_file(filename)
+        
+        if result.get("success"):
+            return jsonify({
+                "success": True,
+                "filename": filename,
+                "deleted_from": result.get("deleted_from", []),
+                "errors": result.get("errors")
+            })
+        else:
+            return jsonify({"error": result.get("error", "Delete failed")}), 400
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/peers/list', methods=['GET'])
 def list_peers():
     """Get list of available peers from tracker."""

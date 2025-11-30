@@ -328,6 +328,27 @@
                     </button>
                 </form>
                 <div id="owned-download-status" style="margin-top: 15px;"></div>
+                
+                <div class="section" style="margin-top: 20px;">
+                    <h3>Delete Owned File</h3>
+                    <p class="description-text" style="margin-bottom: 15px; color: #6c757d;">
+                        Delete an owned file from all storage peers. This action cannot be undone.
+                    </p>
+                    <form id="file-delete-owned-form" class="inline-form">
+                        <div class="form-group">
+                            <select id="owned-file-delete-select" class="form-control" required>
+                                <option value="">-- Select an owned file to delete --</option>
+                            </select>
+                            <button type="button" onclick="loadOwnedFilesForDelete()" class="btn btn-secondary" style="margin-top: 5px;">
+                                <i class="fas fa-sync"></i> Refresh Owned Files
+                            </button>
+                        </div>
+                        <button type="submit" class="btn btn-danger">
+                            <i class="fas fa-trash"></i> Delete Owned File
+                        </button>
+                    </form>
+                    <div id="owned-delete-status" style="margin-top: 15px;"></div>
+                </div>
             </div>
 
             <div class="section">

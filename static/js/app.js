@@ -82,6 +82,7 @@ function showTab(tabName) {
     if (tabName === 'files') {
         // File upload now uses file input, no need to populate dropdown
         loadOwnedFiles();
+        loadOwnedFilesForDelete();
         loadAvailablePeers();
     }
     
@@ -539,6 +540,59 @@ function setupFormHandlers() {
         }
     });
     
+    // Delete owned file form
+    document.getElementById('file-delete-owned-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const filename = document.getElementById('owned-file-delete-select').value;
+        
+        if (!filename) {
+            showToast('Please select a file', 'error');
+            return;
+        }
+        
+        // Confirm deletion
+        if (!confirm(`Are you sure you want to delete "${filename}"? This will delete the file from all storage peers and cannot be undone.`)) {
+            return;
+        }
+        
+        const statusDiv = document.getElementById('owned-delete-status');
+        statusDiv.innerHTML = '<p style="color: #3b82f6;"><i class="fas fa-spinner fa-spin"></i> Deleting owned file...</p>';
+        
+        try {
+            const response = await fetch('/api/file/delete-owned', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    filename: filename
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (result.error) {
+                statusDiv.innerHTML = `<p style="color: #ef4444;"><i class="fas fa-times-circle"></i> Delete Failed: ${result.error}</p>`;
+                showToast('Delete failed: ' + result.error, 'error');
+            } else {
+                const deletedFrom = result.deleted_from || [];
+                const errors = result.errors || [];
+                let message = `File deleted from ${deletedFrom.length} peer(s)`;
+                if (errors.length > 0) {
+                    message += ` (${errors.length} error(s))`;
+                }
+                statusDiv.innerHTML = `<p style="color: #10b981;"><i class="fas fa-check-circle"></i> ${message}</p>`;
+                showToast('Owned file deleted successfully!', 'success');
+                loadOwnedFiles(); // Refresh owned files list
+                loadOwnedFilesForDelete(); // Refresh delete dropdown
+            }
+        } catch (error) {
+            statusDiv.innerHTML = `<p style="color: #ef4444;"><i class="fas fa-times-circle"></i> Error: ${error.message}</p>`;
+            showToast('Error: ' + error.message, 'error');
+        }
+    });
+    
     // Download from network form
     document.getElementById('file-download-network-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -803,6 +857,27 @@ function selectPeer() {
 }
 
 // Load owned files
+async function loadOwnedFilesForDelete() {
+    const select = document.getElementById('owned-file-delete-select');
+    try {
+        const response = await fetch('/api/file/list-owned');
+        const result = await response.json();
+        
+        select.innerHTML = '<option value="">-- Select an owned file to delete --</option>';
+        
+        if (result.files && result.files.length > 0) {
+            result.files.forEach(filename => {
+                const option = document.createElement('option');
+                option.value = filename;
+                option.textContent = filename;
+                select.appendChild(option);
+            });
+        }
+    } catch (error) {
+        console.error('Error loading owned files:', error);
+    }
+}
+
 async function loadOwnedFiles() {
     try {
         const response = await fetch('/api/file/list-owned');

@@ -309,6 +309,8 @@ class Peer:
             return self._handle_upload_to_peer(msg, address or ("0.0.0.0", 0))
         elif msg_type == messages.MessageType.GET_OWNED_FILE:
             return self._handle_get_owned_file(msg, address or ("0.0.0.0", 0))
+        elif msg_type == messages.MessageType.DELETE_OWNED_FILE:
+            return self._handle_delete_owned_file(msg, address or ("0.0.0.0", 0))
         elif msg_type == messages.MessageType.STATUS:
             return self._handle_status()
         elif msg_type == messages.MessageType.TASK_HISTORY:
@@ -1584,6 +1586,112 @@ class Peer:
         """List all files owned by this peer."""
         with self.ownership_lock:
             return list(self.owned_files.keys())
+    
+    def delete_owned_file(self, filename: str) -> Dict:
+        """
+        Delete an owned file from all storage peers.
+        
+        Args:
+            filename: Name of the file to delete
+        
+        Returns:
+            Dict with success status and deletion results
+        """
+        # First, get storage locations from tracker
+        msg = messages.create_message(
+            messages.MessageType.FIND_OWNED_FILE,
+            filename=filename,
+            requester_ip=self.peer_ip,
+            requester_port=self.peer_port
+        )
+        
+        try:
+            response = self._send_to_tracker(msg)
+            if not response:
+                return {"success": False, "error": "No response from tracker"}
+            
+            if response.get("type") != messages.MessageType.OWNED_FILE_RESPONSE:
+                return {"success": False, "error": f"Unexpected response: {response.get('error', 'unknown')}"}
+            
+            if not response.get("found"):
+                return {"success": False, "error": "File not found in tracker registry"}
+            
+            storage_peers = response.get("storage_peers", [])
+            if not storage_peers:
+                return {"success": False, "error": "No storage peers found"}
+            
+            # Delete from each storage peer
+            deleted_peers = []
+            errors = []
+            
+            for peer_info in storage_peers:
+                storage_ip = peer_info.get("ip")
+                storage_port = peer_info.get("port")
+                
+                if not storage_ip or not storage_port:
+                    continue
+                
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(config.SOCKET_TIMEOUT)
+                    sock.connect((storage_ip, storage_port))
+                    
+                    delete_msg = messages.create_message(
+                        messages.MessageType.DELETE_OWNED_FILE,
+                        filename=filename,
+                        requester_ip=self.peer_ip,
+                        requester_port=self.peer_port
+                    )
+                    
+                    self._send_message(sock, messages.serialize_message(delete_msg))
+                    response_data = self._receive_message(sock)
+                    sock.close()
+                    
+                    if response_data:
+                        result = messages.deserialize_message(response_data)
+                        if result.get("status") == "OK":
+                            deleted_peers.append((storage_ip, storage_port))
+                            logger.info(f"Deleted {filename} from {storage_ip}:{storage_port}")
+                        else:
+                            errors.append(f"{storage_ip}:{storage_port}: {result.get('error', 'Unknown error')}")
+                    else:
+                        errors.append(f"{storage_ip}:{storage_port}: No response")
+                except Exception as e:
+                    errors.append(f"{storage_ip}:{storage_port}: {str(e)}")
+                    logger.warning(f"Failed to delete {filename} from {storage_ip}:{storage_port}: {e}")
+            
+            # Remove from owned_files dictionary
+            with self.ownership_lock:
+                if filename in self.owned_files:
+                    del self.owned_files[filename]
+            
+            # Notify tracker to remove from registry
+            try:
+                delete_tracker_msg = messages.create_message(
+                    messages.MessageType.DELETE_OWNED_FILE,
+                    filename=filename,
+                    owner_ip=self.peer_ip,
+                    owner_port=self.peer_port
+                )
+                self._send_to_tracker(delete_tracker_msg)
+            except Exception as e:
+                logger.warning(f"Failed to notify tracker of deletion: {e}")
+            
+            if deleted_peers:
+                return {
+                    "success": True,
+                    "filename": filename,
+                    "deleted_from": deleted_peers,
+                    "errors": errors if errors else None
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed to delete from any peer. Errors: {', '.join(errors)}"
+                }
+        except Exception as e:
+            logger.error(f"Exception deleting owned file: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
     
     def _register_owned_file_with_tracker(self, filename: str, storage_ip: str, storage_port: int):
         """Register an owned file with the tracker."""
