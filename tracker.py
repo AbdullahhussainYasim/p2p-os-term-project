@@ -79,7 +79,7 @@ class Tracker:
         # Load persisted ownership records
         self._load_ownership_state()
         
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # Use reentrant lock to allow nested locking
         self.running = False
         self.server_socket: Optional[socket.socket] = None
         self.cleanup_thread: Optional[threading.Thread] = None
@@ -584,16 +584,22 @@ class Tracker:
             logger.warning(f"Failed to load ownership state: {e}")
     
     def _save_ownership_state(self):
-        """Save ownership records to disk."""
+        """Save ownership records to disk.
+        
+        Note: This method assumes the lock is already held by the caller.
+        It uses the lock to safely read the registry, then releases it before
+        writing to disk to avoid blocking other operations.
+        """
         try:
-            with self.lock:
-                data = {}
-                for filename, (owner_key, storage_keys) in self.owned_file_registry.items():
-                    data[filename] = {
-                        "owner": {"ip": owner_key[0], "port": owner_key[1]},
-                        "storage": [{"ip": ip, "port": port} for ip, port in storage_keys]
-                    }
+            # Read data while holding lock (assumed to be held by caller)
+            data = {}
+            for filename, (owner_key, storage_keys) in self.owned_file_registry.items():
+                data[filename] = {
+                    "owner": {"ip": owner_key[0], "port": owner_key[1]},
+                    "storage": [{"ip": ip, "port": port} for ip, port in storage_keys]
+                }
             
+            # Write to disk outside the lock to avoid blocking
             temp_file = self.ownership_state_file.with_suffix('.tmp')
             with open(temp_file, 'w') as f:
                 json.dump(data, f, indent=2)
