@@ -162,17 +162,21 @@ class Tracker:
         try:
             data = self._receive_message(client_socket)
             if not data:
+                logger.debug(f"No data received from {address}")
                 return
             
             msg = messages.deserialize_message(data)
             msg_type = msg.get("type")
             
-            logger.debug(f"Received {msg_type} from {address}")
+            logger.info(f"Received {msg_type} from {address}")
             
             response = self._process_message(msg, address)
             
             if response:
+                logger.debug(f"Sending response for {msg_type} to {address}")
                 self._send_message(client_socket, messages.serialize_message(response))
+            else:
+                logger.warning(f"No response generated for {msg_type} from {address}")
         
         except Exception as e:
             logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -385,11 +389,18 @@ class Tracker:
         requester_ip = msg.get("requester_ip", address[0])
         requester_port = msg.get("requester_port")
         
-        if not filename or not requester_port:
-            return messages.create_error_message("Missing required fields")
+        logger.info(f"FIND_OWNED_FILE request for {filename} from {requester_ip}:{requester_port}")
+        
+        if not filename:
+            logger.warning("FIND_OWNED_FILE: filename missing")
+            return messages.create_error_message("Filename required")
+        if not requester_port:
+            logger.warning("FIND_OWNED_FILE: requester_port missing")
+            return messages.create_error_message("Requester port required")
         
         with self.lock:
             if filename not in self.owned_file_registry:
+                logger.warning(f"FIND_OWNED_FILE: File {filename} not found in registry (total files: {len(self.owned_file_registry)})")
                 return messages.create_message(
                     messages.MessageType.OWNED_FILE_RESPONSE,
                     filename=filename,

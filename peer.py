@@ -1502,6 +1502,7 @@ class Peer:
             File data as bytes, or None if not found
         """
         # First, query tracker to find storage locations
+        logger.info(f"Querying tracker for owned file: {filename} (owner: {self.peer_ip}:{self.peer_port})")
         msg = messages.create_message(
             messages.MessageType.FIND_OWNED_FILE,
             filename=filename,
@@ -1509,13 +1510,19 @@ class Peer:
             requester_port=self.peer_port
         )
         
-        response = self._send_to_tracker(msg)
-        if not response:
-            logger.error("No response from tracker when querying for owned file")
-            return None
-        
-        if response.get("type") != messages.MessageType.OWNED_FILE_RESPONSE:
-            logger.error(f"Unexpected response type from tracker: {response.get('type')}, error: {response.get('error', 'unknown')}")
+        try:
+            response = self._send_to_tracker(msg)
+            if not response:
+                logger.error("No response from tracker when querying for owned file")
+                return None
+            
+            logger.debug(f"Tracker response type: {response.get('type')}, found: {response.get('found')}")
+            
+            if response.get("type") != messages.MessageType.OWNED_FILE_RESPONSE:
+                logger.error(f"Unexpected response type from tracker: {response.get('type')}, error: {response.get('error', 'unknown')}")
+                return None
+        except Exception as e:
+            logger.error(f"Exception querying tracker for owned file: {e}", exc_info=True)
             return None
         
         if not response.get("found"):
@@ -1621,17 +1628,31 @@ class Peer:
         sock.settimeout(config.SOCKET_TIMEOUT)
         
         try:
+            logger.debug(f"Connecting to tracker at {self.tracker_host}:{self.tracker_port}...")
             sock.connect((self.tracker_host, self.tracker_port))
+            logger.debug(f"Sending message type {msg.get('type')} to tracker...")
             self._send_message(sock, messages.serialize_message(msg))
             
+            logger.debug("Waiting for response from tracker...")
             data = self._receive_message(sock)
             if data:
-                return messages.deserialize_message(data)
+                response = messages.deserialize_message(data)
+                logger.debug(f"Received response from tracker: type={response.get('type')}")
+                return response
+            else:
+                logger.warning("No data received from tracker")
+                return None
+        except socket.timeout:
+            logger.error(f"Timeout communicating with tracker at {self.tracker_host}:{self.tracker_port}")
+            return None
         except Exception as e:
-            logger.error(f"Error communicating with tracker: {e}")
+            logger.error(f"Error communicating with tracker: {e}", exc_info=True)
             return None
         finally:
-            sock.close()
+            try:
+                sock.close()
+            except:
+                pass
     
     def _receive_message(self, sock: socket.socket) -> Optional[bytes]:
         """Receive a complete message from socket."""
