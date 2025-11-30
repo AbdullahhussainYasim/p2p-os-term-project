@@ -574,12 +574,16 @@ class Tracker:
         requester_ip = msg.get("requester_ip", address[0])
         requester_port = msg.get("requester_port")
         
+        logger.info(f"LIST_OWNED_FILES request from {requester_ip}:{requester_port}")
+        
         if not requester_port:
             return messages.create_error_message("Requester port required")
         
         try:
             with self.lock:
                 owned_files_list = []
+                logger.debug(f"Checking {len(self.owned_file_registry)} files in registry for owner port {requester_port}")
+                
                 for filename, (owner_key, storage_peers) in self.owned_file_registry.items():
                     # Check if this peer is the owner (by port, to handle IP changes)
                     if owner_key[1] == requester_port:
@@ -587,6 +591,7 @@ class Tracker:
                             "filename": filename,
                             "storage_peers": [{"ip": ip, "port": port} for ip, port in storage_peers]
                         })
+                        logger.debug(f"Found owned file: {filename} (owner: {owner_key}, storage: {storage_peers})")
                 
                 logger.info(f"LIST_OWNED_FILES: Found {len(owned_files_list)} files owned by {requester_ip}:{requester_port}")
                 return messages.create_status_message("OK", {

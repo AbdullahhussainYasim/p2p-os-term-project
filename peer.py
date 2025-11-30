@@ -1627,6 +1627,10 @@ class Peer:
     def _rebuild_owned_files_from_tracker(self):
         """Rebuild owned_files dictionary by querying the tracker (after peer restart)."""
         try:
+            # Wait a bit for tracker to be ready
+            time.sleep(0.5)
+            
+            logger.info(f"Querying tracker for owned files (owner: {self.peer_ip}:{self.peer_port})...")
             msg = messages.create_message(
                 messages.MessageType.LIST_OWNED_FILES,
                 requester_ip=self.peer_ip,
@@ -1638,12 +1642,20 @@ class Peer:
                 logger.warning("No response from tracker when querying for owned files")
                 return
             
+            logger.debug(f"Tracker response: type={response.get('type')}, status={response.get('status')}")
+            
             if response.get("type") != messages.MessageType.STATUS:
-                logger.warning(f"Unexpected response type from tracker: {response.get('type')}")
+                logger.warning(f"Unexpected response type from tracker: {response.get('type')}, error: {response.get('error', 'unknown')}")
                 return
             
+            # Handle both response formats
             data = response.get("data", {})
+            if not data:
+                # Try direct access if data is None
+                data = response
+            
             owned_files_list = data.get("owned_files", [])
+            logger.info(f"Tracker returned {len(owned_files_list)} owned files")
             
             with self.ownership_lock:
                 for file_info in owned_files_list:
@@ -1657,7 +1669,7 @@ class Peer:
                 
                 logger.info(f"Rebuilt {len(self.owned_files)} owned files from tracker")
         except Exception as e:
-            logger.warning(f"Failed to rebuild owned files from tracker: {e}")
+            logger.error(f"Failed to rebuild owned files from tracker: {e}", exc_info=True)
     
     def _send_to_tracker(self, msg: Dict) -> Optional[Dict]:
         """Send a message to the tracker and return response."""
