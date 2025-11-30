@@ -452,6 +452,125 @@ def run_web_ui(peer: Peer, host='127.0.0.1', port=5000, debug=False):
     app.run(host=host, port=port, debug=debug, threaded=True, use_reloader=False)
 
 
+@app.route('/api/file/upload-remote', methods=['POST'])
+def upload_file_to_remote_peer():
+    """Upload a file to a remote peer with ownership."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        data = request.json
+        filename = data.get("filename")
+        target_ip = data.get("target_ip")
+        target_port = data.get("target_port")
+        replication = int(data.get("replication", 1))
+        
+        if not filename or not target_ip or not target_port:
+            return jsonify({"error": "filename, target_ip, and target_port required"}), 400
+        
+        # Get file from local storage
+        file_data = peer_instance.file_storage.get_file(filename)
+        if not file_data:
+            return jsonify({"error": f"File {filename} not found in local storage"}), 404
+        
+        # Upload to remote peer
+        result = peer_instance.upload_file_to_peer(
+            filename=filename,
+            file_data=file_data,
+            target_peers=[(target_ip, target_port)],
+            replication=replication
+        )
+        
+        if result.get("success"):
+            return jsonify({
+                "success": True,
+                "filename": filename,
+                "storage_peers": result.get("storage_peers", [])
+            })
+        else:
+            return jsonify({"error": result.get("error", "Upload failed")}), 400
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/file/download-owned', methods=['POST'])
+def download_owned_file():
+    """Download an owned file from storage peer(s)."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        data = request.json
+        filename = data.get("filename")
+        
+        if not filename:
+            return jsonify({"error": "filename required"}), 400
+        
+        # Download owned file
+        file_data = peer_instance.download_owned_file(filename)
+        
+        if file_data is None:
+            return jsonify({"error": "File not found or not accessible"}), 404
+        
+        # Save to local storage
+        success = peer_instance.file_storage.put_file(filename, file_data)
+        
+        if success:
+            return jsonify({
+                "success": True,
+                "filename": filename,
+                "size": len(file_data)
+            })
+        else:
+            return jsonify({"error": "Failed to save file"}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/file/list-owned', methods=['GET'])
+def list_owned_files():
+    """List all files owned by this peer."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        owned_files = peer_instance.list_owned_files()
+        return jsonify({"files": owned_files})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/peers/list', methods=['GET'])
+def list_peers():
+    """Get list of available peers from tracker."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        # Query tracker for peer list
+        msg = messages.create_message(messages.MessageType.STATUS)
+        response = peer_instance._send_to_tracker(msg)
+        
+        if response and "data" in response:
+            peers_data = response["data"].get("peers", [])
+            # Filter out current peer
+            current_peer = {"ip": peer_instance.peer_ip, "port": peer_instance.peer_port}
+            other_peers = [
+                {"ip": p.get("ip"), "port": p.get("port")}
+                for p in peers_data
+                if p.get("ip") != current_peer["ip"] or p.get("port") != current_peer["port"]
+            ]
+            return jsonify({"peers": other_peers})
+        else:
+            return jsonify({"peers": []})
+    except Exception as e:
+        return jsonify({"error": str(e), "peers": []}), 500
+
+
 if __name__ == '__main__':
     # For testing
     from peer import Peer
