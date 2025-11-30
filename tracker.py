@@ -160,6 +160,9 @@ class Tracker:
     def _handle_client(self, client_socket: socket.socket, address: Tuple[str, int]):
         """Handle a client connection."""
         try:
+            # Set socket timeout
+            client_socket.settimeout(config.SOCKET_TIMEOUT)
+            
             data = self._receive_message(client_socket)
             if not data:
                 logger.debug(f"No data received from {address}")
@@ -170,7 +173,10 @@ class Tracker:
             
             logger.info(f"Received {msg_type} from {address}")
             
+            # Process message and get response
+            logger.debug(f"Processing {msg_type} from {address}...")
             response = self._process_message(msg, address)
+            logger.debug(f"Processed {msg_type} from {address}, response type: {response.get('type') if response else None}")
             
             if response:
                 logger.info(f"Sending response for {msg_type} to {address}, response type: {response.get('type')}")
@@ -179,6 +185,8 @@ class Tracker:
                     logger.debug(f"Serialized response size: {len(serialized)} bytes")
                     self._send_message(client_socket, serialized)
                     logger.info(f"Response sent successfully for {msg_type} to {address}")
+                except socket.error as e:
+                    logger.error(f"Socket error sending response for {msg_type} to {address}: {e}")
                 except Exception as e:
                     logger.error(f"Error sending response for {msg_type} to {address}: {e}", exc_info=True)
             else:
@@ -186,19 +194,25 @@ class Tracker:
                 # Send error response if no response was generated
                 try:
                     error_response = messages.create_error_message(f"No response generated for {msg_type}")
-                    self._send_message(client_socket, messages.serialize_message(error_response))
-                except:
-                    pass
+                    serialized = messages.serialize_message(error_response)
+                    self._send_message(client_socket, serialized)
+                    logger.info(f"Sent error response to {address}")
+                except Exception as e:
+                    logger.error(f"Failed to send error response: {e}")
         
         except Exception as e:
             logger.error(f"Error handling client {address}: {e}", exc_info=True)
             try:
                 error_msg = messages.create_error_message(str(e))
                 self._send_message(client_socket, messages.serialize_message(error_msg))
+                logger.info(f"Sent error response to {address}")
+            except Exception as send_err:
+                logger.error(f"Failed to send error response to {address}: {send_err}")
+        finally:
+            try:
+                client_socket.close()
             except:
                 pass
-        finally:
-            client_socket.close()
     
     def _process_message(self, msg: Dict, address: Tuple[str, int]) -> Optional[Dict]:
         """Process a message and return response."""
@@ -220,10 +234,17 @@ class Tracker:
             elif msg_type == messages.MessageType.REGISTER_OWNED_FILE:
                 return self._handle_register_owned_file(msg, address)
             elif msg_type == messages.MessageType.FIND_OWNED_FILE:
-                logger.debug(f"Calling _handle_find_owned_file for {msg.get('filename')}")
-                response = self._handle_find_owned_file(msg, address)
-                logger.debug(f"_handle_find_owned_file returned: type={response.get('type') if response else None}")
-                return response
+                logger.info(f"Processing FIND_OWNED_FILE for {msg.get('filename')}")
+                try:
+                    response = self._handle_find_owned_file(msg, address)
+                    if response:
+                        logger.info(f"_handle_find_owned_file returned response: type={response.get('type')}, found={response.get('found')}")
+                    else:
+                        logger.error("_handle_find_owned_file returned None!")
+                    return response
+                except Exception as e:
+                    logger.error(f"Exception in FIND_OWNED_FILE handler: {e}", exc_info=True)
+                    return messages.create_error_message(f"Error processing FIND_OWNED_FILE: {e}")
             elif msg_type == messages.MessageType.REPORT_OWNED_FILES:
                 return self._handle_report_owned_files(msg, address)
             elif msg_type == messages.MessageType.STATUS:
@@ -457,7 +478,7 @@ class Tracker:
                     new_owner_key = (requester_ip, requester_port)
                     self.owned_file_registry[filename] = (new_owner_key, storage_peers)
                     owner_key = new_owner_key
-                    self._save_ownership_state()
+                    # Don't save state here - do it after response is sent to avoid blocking
                 
                 # Filter to only alive storage peers
                 for storage_key in storage_peers:
@@ -471,9 +492,13 @@ class Tracker:
                 # Update registry if some peers are dead
                 if len(alive_storage_peers) < len(storage_peers):
                     self.owned_file_registry[filename] = (owner_key, [(p["ip"], p["port"]) for p in alive_storage_peers])
-                    self._save_ownership_state()
+                    # Don't save state here - do it after response is sent to avoid blocking
             
-            # Create response outside the lock
+            # Create response outside the lock (to avoid holding lock while creating response)
+            if owner_key is None:
+                logger.error("owner_key is None after processing!")
+                return messages.create_error_message("Internal error: owner_key is None")
+            
             response = messages.create_message(
                 messages.MessageType.OWNED_FILE_RESPONSE,
                 filename=filename,
@@ -482,7 +507,7 @@ class Tracker:
                 owner_port=owner_key[1],
                 storage_peers=alive_storage_peers
             )
-            logger.info(f"Created OWNED_FILE_RESPONSE for {filename}: found={len(alive_storage_peers) > 0}, peers={len(alive_storage_peers)}")
+            logger.info(f"Created OWNED_FILE_RESPONSE for {filename}: found={len(alive_storage_peers) > 0}, peers={len(alive_storage_peers)}, owner={owner_key}")
             return response
         except Exception as e:
             logger.error(f"Error in _handle_find_owned_file: {e}", exc_info=True)
@@ -593,9 +618,15 @@ class Tracker:
         try:
             # Send length first (4 bytes)
             length = len(data).to_bytes(4, 'big')
+            logger.debug(f"Sending message: length={len(data)} bytes, total={len(length) + len(data)} bytes")
+            # Use sendall to ensure all data is sent
             sock.sendall(length + data)
+            logger.debug(f"Message sent successfully")
+        except socket.error as e:
+            logger.error(f"Socket error sending message: {e}")
+            raise
         except Exception as e:
-            logger.error(f"Error sending message: {e}")
+            logger.error(f"Error sending message: {e}", exc_info=True)
             raise
 
 
