@@ -1,9 +1,10 @@
+
 # P2P OS Resource Sharing System
 
 A lightweight, peer-to-peer (P2P) distributed system in Python that simulates an operating system's ability to share CPU, memory, and disk resources across a network.
 
 ![Python Version](https://img.shields.io/badge/python-3.x-blue.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+![License](https://img.ios/badge/license-MIT-green.svg)
 
 ---
 
@@ -26,15 +27,36 @@ It's designed as an academic project to demonstrate core concepts in distributed
 
 ## 🏗️ System Architecture
 
-The system consists of two main components: the **Tracker** and the **Peers**. The following diagram shows a practical workflow for offloading a task.
+The system consists of two main components: the **Tracker** and the **Peers**.
 
 ```mermaid
 graph TD
-    subgraph " "
-        T["**Tracker**<br/>_Central Coordinator_"]
-        P1["**Peer A**<br/>(Client/Server)"]
-        P2["**Peer B**<br/>(Client/Server)"]
-        P3["**Peer C**<br/>(Client/Server)"]
+    subgraph Network
+        T[**Tracker**]
+        P1[**Peer 1**]
+        P2[**Peer 2**]
+        P3[**Peer 3**]
+    end
+
+    subgraph "Peer 1 (**Client & Server**)"
+        direction LR
+        P1_Client[**Client Logic**]
+        P1_Server[**Server Logic**]
+        P1_RR[**Round-Robin Scheduler**]
+    end
+
+    subgraph "Peer 2 (**Client & Server**)"
+        direction LR
+        P2_Client[**Client Logic**]
+        P2_Server[**Server Logic**]
+        P2_RR[**Round-Robin Scheduler**]
+    end
+
+    subgraph "Peer 3 (**Client & Server**)"
+        direction LR
+        P3_Client[**Client Logic**]
+        P3_Server[**Server Logic**]
+        P3_RR[**Round-Robin Scheduler**]
     end
 
     style T fill:#f9f,stroke:#333,stroke-width:2px
@@ -42,14 +64,15 @@ graph TD
     style P2 fill:#bbf,stroke:#333,stroke-width:2px
     style P3 fill:#bbf,stroke:#333,stroke-width:2px
 
-    P1 -- "1. Registers & sends load updates" --> T
-    P2 -- "1. Registers & sends load updates" --> T
-    P3 -- "1. Registers & sends load updates" --> T
+    P1 -- "**1. Register / Update Load**" --> T
+    P2 -- "**1. Register / Update Load**" --> T
+    P3 -- "**1. Register / Update Load**" --> T
 
-    P1 -- "2. Asks: **'Who can run my task?'**" --> T
-    T -- "3. Responds: **'Peer B is best (lowest load)'**" --> P1
-    P1 -- "4. Sends task directly to Peer B" --> P2
-    P2 -- "5. Executes task & sends result back" --> P1
+    P1_Client -- "**2. Request Least-Loaded Peer**" --> T
+    T -- "**3. Return Peer 2 Address**" --> P1_Client
+    P1_Client -- "**4. Send Task Directly**" --> P2_Server
+    P2_Server -- "**5. Add to Queue**" --> P2_RR
+    P2_RR -- "**6. Execute & Return Result**" --> P1_Client
 ```
 
 - **Tracker**: A central server that maintains a list of active peers and their current CPU load. It doesn't execute tasks itself but acts as a matchmaker.
@@ -119,28 +142,25 @@ python peer.py --port 9001 --web-port 5001
 
 ### CPU Task Workflow
 
-This diagram illustrates the two practical paths for a CPU task, depending on the `confidential` flag.
+This diagram illustrates the two paths for a CPU task, depending on the `confidential` flag.
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant Client as **Peer A (Client)**
+    participant Client as **Client (Peer A)**
     participant Tracker as **Tracker**
-    participant PeerB as **Peer B (Worker)**
+    participant PeerB as **Remote Peer (Peer B)**
 
-    alt **Non-Confidential Task** (public workload)
-        Client->>Tracker: **MSG: GET_BEST_PEER**<br/>Find least-loaded peer for my task.
-        Tracker-->>Client: **RESP: PEER_B_ADDR**<br/>Peer B is available at 1.2.3.4:9001.
-        Client->>PeerB: **MSG: CPU_TASK**<br/>Execute this Python function.
-        Note right of PeerB: Peer B's scheduler queues the task.
-        PeerB-->>Client: **RESP: CPU_RESULT**<br/>Here is the output of your program.
+    alt **Task is NOT Confidential** (confidential: false)
+        Client->>Tracker: **1. Request best peer for task**
+        Tracker-->>Client: **2. Peer B is least loaded**
+        Client->>PeerB: **3. Execute this program**
+        PeerB-->>Client: **4. Here is the result**
     end
 
-    alt **Confidential Task** (private workload)
-        Note over Client: **`confidential: true`** flag is checked.
-        Note over Client: The Tracker is **NOT** contacted to protect privacy.
-        Client->>Client: **Local Execution**<br/>Task is added to own scheduler.
-        Client-->>Client: **Result Computed**<br/>Output is available immediately.
+    alt **Task IS Confidential** (confidential: true)
+        Client->>Client: **1. Execute task locally (no network calls)**
+        Note right of Client: **Task added directly to own scheduler queue**
+        Client-->>Client: **2. Result is computed**
     end
 ```
 
