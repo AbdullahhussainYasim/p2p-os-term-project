@@ -137,6 +137,8 @@ class Peer:
         self._reconstruct_owned_files_metadata()
         # Report owned files to tracker (helps rebuild registry after tracker restart)
         self._report_owned_files_to_tracker()
+        # Rebuild owned_files dictionary from tracker (files this peer owns)
+        self._rebuild_owned_files_from_tracker()
         
         # Start heartbeat thread
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
@@ -1621,6 +1623,41 @@ class Peer:
                 logger.debug(f"Reported {len(owned_files_list)} owned files to tracker")
         except Exception as e:
             logger.debug(f"Failed to report owned files to tracker: {e}")
+    
+    def _rebuild_owned_files_from_tracker(self):
+        """Rebuild owned_files dictionary by querying the tracker (after peer restart)."""
+        try:
+            msg = messages.create_message(
+                messages.MessageType.LIST_OWNED_FILES,
+                requester_ip=self.peer_ip,
+                requester_port=self.peer_port
+            )
+            
+            response = self._send_to_tracker(msg)
+            if not response:
+                logger.warning("No response from tracker when querying for owned files")
+                return
+            
+            if response.get("type") != messages.MessageType.STATUS:
+                logger.warning(f"Unexpected response type from tracker: {response.get('type')}")
+                return
+            
+            data = response.get("data", {})
+            owned_files_list = data.get("owned_files", [])
+            
+            with self.ownership_lock:
+                for file_info in owned_files_list:
+                    filename = file_info.get("filename")
+                    storage_peers = file_info.get("storage_peers", [])
+                    if filename:
+                        # Convert storage_peers from dict list to tuple list
+                        storage_tuples = [(p["ip"], p["port"]) for p in storage_peers if "ip" in p and "port" in p]
+                        self.owned_files[filename] = storage_tuples
+                        logger.info(f"Rebuilt owned file: {filename} stored on {len(storage_tuples)} peer(s)")
+                
+                logger.info(f"Rebuilt {len(self.owned_files)} owned files from tracker")
+        except Exception as e:
+            logger.warning(f"Failed to rebuild owned files from tracker: {e}")
     
     def _send_to_tracker(self, msg: Dict) -> Optional[Dict]:
         """Send a message to the tracker and return response."""

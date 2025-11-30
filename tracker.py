@@ -247,6 +247,8 @@ class Tracker:
                     return messages.create_error_message(f"Error processing FIND_OWNED_FILE: {e}")
             elif msg_type == messages.MessageType.REPORT_OWNED_FILES:
                 return self._handle_report_owned_files(msg, address)
+            elif msg_type == messages.MessageType.LIST_OWNED_FILES:
+                return self._handle_list_owned_files(msg, address)
             elif msg_type == messages.MessageType.STATUS:
                 return self._handle_status()
             else:
@@ -566,6 +568,33 @@ class Tracker:
                 logger.info(f"Updated {updated_count} owned file records from storage peer {storage_ip}:{storage_port}")
         
         return messages.create_status_message("OK", {"updated_count": updated_count})
+    
+    def _handle_list_owned_files(self, msg: Dict, address: Tuple[str, int]) -> Dict:
+        """Handle request to list all files owned by a peer."""
+        requester_ip = msg.get("requester_ip", address[0])
+        requester_port = msg.get("requester_port")
+        
+        if not requester_port:
+            return messages.create_error_message("Requester port required")
+        
+        try:
+            with self.lock:
+                owned_files_list = []
+                for filename, (owner_key, storage_peers) in self.owned_file_registry.items():
+                    # Check if this peer is the owner (by port, to handle IP changes)
+                    if owner_key[1] == requester_port:
+                        owned_files_list.append({
+                            "filename": filename,
+                            "storage_peers": [{"ip": ip, "port": port} for ip, port in storage_peers]
+                        })
+                
+                logger.info(f"LIST_OWNED_FILES: Found {len(owned_files_list)} files owned by {requester_ip}:{requester_port}")
+                return messages.create_status_message("OK", {
+                    "owned_files": owned_files_list
+                })
+        except Exception as e:
+            logger.error(f"Error in _handle_list_owned_files: {e}", exc_info=True)
+            return messages.create_error_message(f"Error listing owned files: {e}")
     
     def _load_ownership_state(self):
         """Load persisted ownership records from disk."""

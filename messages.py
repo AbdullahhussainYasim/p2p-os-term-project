@@ -42,6 +42,7 @@ class MessageType:
     OWNED_FILE_RESPONSE = "OWNED_FILE_RESPONSE"
     DELETE_OWNED_FILE = "DELETE_OWNED_FILE"
     REPORT_OWNED_FILES = "REPORT_OWNED_FILES"  # Storage peer reports what owned files it has
+    LIST_OWNED_FILES = "LIST_OWNED_FILES"  # Query all files owned by a peer
     
     # Status messages
     STATUS = "STATUS"
