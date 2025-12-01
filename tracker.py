@@ -73,6 +73,11 @@ class Tracker:
         # owner_address is (ip, port) tuple (for backward compatibility and current location)
         # storage_peers is list of (ip, port) tuples where file is stored
         self.owned_file_registry: Dict[str, Tuple[str, Tuple[str, int], List[Tuple[str, int]]]] = {}
+
+        # Owned storage usage (approximate): counts how many owned files each peer stores.
+        # This is used to choose storage peers with the most free capacity.
+        # (ip, port) -> number_of_owned_files_stored
+        self.owned_storage_counts: Dict[Tuple[str, int], int] = {}
         
         # Persistence
         self.state_dir = Path("tracker_state")
@@ -258,6 +263,8 @@ class Tracker:
                 return self._handle_report_owned_files(msg, address)
             elif msg_type == messages.MessageType.LIST_OWNED_FILES:
                 return self._handle_list_owned_files(msg, address)
+            elif msg_type == messages.MessageType.REQUEST_STORAGE_PEERS:
+                return self._handle_request_storage_peers(msg, address)
             elif msg_type == messages.MessageType.DELETE_OWNED_FILE:
                 return self._handle_delete_owned_file(msg, address)
             elif msg_type == messages.MessageType.STATUS:
@@ -645,6 +652,9 @@ class Tracker:
             else:
                 # New owned file
                 self.owned_file_registry[filename] = (owner_id, owner_key, [storage_key])
+
+            # Update approximate storage count for this storage peer
+            self.owned_storage_counts[storage_key] = self.owned_storage_counts.get(storage_key, 0) + 1
             
             logger.info(f"Owned file registered: {filename} owned by {owner_ip}:{owner_port}, stored on {storage_ip}:{storage_port}")
             
@@ -969,6 +979,15 @@ class Tracker:
                 
                 # Remove from registry
                 del self.owned_file_registry[filename]
+
+                # Update approximate storage counts: decrement for each storage peer
+                if hasattr(self, "owned_storage_counts"):
+                    for storage_key in storage_peers:
+                        if storage_key in self.owned_storage_counts:
+                            self.owned_storage_counts[storage_key] = max(
+                                0, self.owned_storage_counts[storage_key] - 1
+                            )
+
                 self._save_ownership_state()
                 
                 logger.info(f"Deleted owned file {filename} from registry (owned by {owner_ip}:{owner_port})")
@@ -976,6 +995,70 @@ class Tracker:
         except Exception as e:
             logger.error(f"Error in _handle_delete_owned_file: {e}", exc_info=True)
             return messages.create_error_message(f"Error deleting owned file: {e}")
+
+    def _handle_request_storage_peers(self, msg: Dict, address: Tuple[str, int]) -> Dict:
+        """
+        Select best storage peers for an owned file.
+        
+        Approximate strategy:
+        - Consider all registered, alive peers except the owner.
+        - Use owned_storage_counts (number of owned files stored) as a proxy for usage.
+        - Peers with FEWER owned files are treated as having more free storage.
+        - Return up to 'replication' peers with the lowest counts.
+        """
+        owner_ip = msg.get("owner_ip", address[0])
+        owner_port = msg.get("owner_port")
+        replication = msg.get("replication", 1)
+        
+        if not owner_port:
+            return messages.create_error_message("owner_port required")
+        
+        if replication <= 0:
+            replication = 1
+        
+        owner_key = (owner_ip, owner_port)
+        
+        with self.lock:
+            if not self.peers:
+                return messages.create_error_message("No peers available")
+            
+            candidates: list[tuple[Tuple[str, int], int]] = []
+            for peer_key, peer_info in self.peers.items():
+                # Exclude owner itself
+                if peer_key == owner_key:
+                    continue
+                
+                # Only consider alive peers
+                if not peer_info.is_alive(config.PEER_TIMEOUT):
+                    continue
+                
+                used_count = getattr(self, "owned_storage_counts", {}).get(peer_key, 0)
+                candidates.append((peer_key, used_count))
+            
+            if not candidates:
+                return messages.create_error_message("No storage peers available")
+            
+            # Sort by used_count ascending (fewest files first)
+            candidates.sort(key=lambda x: x[1])
+            
+            selected = []
+            for peer_key, used_count in candidates[:replication]:
+                selected.append({
+                    "ip": peer_key[0],
+                    "port": peer_key[1],
+                    "owned_files": used_count
+                })
+            
+            if not selected:
+                return messages.create_error_message("No suitable storage peers found")
+            
+            return messages.create_message(
+                messages.MessageType.STORAGE_PEERS_RESPONSE,
+                owner_ip=owner_ip,
+                owner_port=owner_port,
+                replication=replication,
+                peers=selected
+            )
     
     def _load_ownership_state(self):
         """Load persisted ownership records from disk."""

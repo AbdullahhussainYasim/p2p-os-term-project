@@ -44,6 +44,9 @@ class MessageType:
     DELETE_OWNED_FILE = "DELETE_OWNED_FILE"
     REPORT_OWNED_FILES = "REPORT_OWNED_FILES"  # Storage peer reports what owned files it has
     LIST_OWNED_FILES = "LIST_OWNED_FILES"  # Query all files owned by a peer
+    # Owned storage peer selection
+    REQUEST_STORAGE_PEERS = "REQUEST_STORAGE_PEERS"  # Owner asks tracker for best storage peers
+    STORAGE_PEERS_RESPONSE = "STORAGE_PEERS_RESPONSE"  # Tracker replies with selected storage peers
     
     # Status messages
     STATUS = "STATUS"

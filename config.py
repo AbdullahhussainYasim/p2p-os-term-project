@@ -22,6 +22,10 @@ OWNED_STORAGE_DIR = "owned_storage"  # Separate directory for owned files
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB max file size
 PEER_ID_FILE = "peer_id.txt"  # Persistent peer ID file
 
+# Maximum storage a peer can use for storing OTHER peers' owned files (in bytes).
+# 1 GB per peer as required.
+OWNED_STORAGE_MAX_BYTES = 1024 * 1024 * 1024
+
 # Scheduler settings
 ROUND_ROBIN_QUANTUM = 1  # Not used for preemption, but for logging
 

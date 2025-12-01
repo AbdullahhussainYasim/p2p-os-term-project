@@ -1327,15 +1327,35 @@ class Peer:
             encrypted_data = base64.b64decode(data_b64)
             logger.debug(f"Decoded to {len(encrypted_data)} bytes")
             
-            # Check file size
+            # Check file size limit
             if len(encrypted_data) > config.MAX_FILE_SIZE:
                 logger.warning(f"File too large: {len(encrypted_data)} bytes")
                 return messages.create_error_message(f"File too large (max {config.MAX_FILE_SIZE} bytes)")
-            
-            # Store in owned_storage directory with restricted permissions
+
+            # Enforce per-peer owned storage quota (1 GB for other peers' data)
             from pathlib import Path
             owned_storage_base = Path(config.OWNED_STORAGE_DIR)
             owned_storage_base.mkdir(exist_ok=True, mode=0o700)  # Only owner can access
+
+            # Compute current used bytes in owned_storage (all owners)
+            used_bytes = 0
+            for root, dirs, files in os.walk(owned_storage_base):
+                for name in files:
+                    try:
+                        fp = os.path.join(root, name)
+                        used_bytes += os.path.getsize(fp)
+                    except OSError:
+                        continue
+
+            new_total = used_bytes + len(encrypted_data)
+            if new_total > getattr(config, "OWNED_STORAGE_MAX_BYTES", 1024 * 1024 * 1024):
+                logger.warning(
+                    f"Owned storage quota exceeded: used={used_bytes} bytes, "
+                    f"new_file={len(encrypted_data)} bytes"
+                )
+                return messages.create_error_message(
+                    "Owned storage quota exceeded (max 1 GB for other peers' data)"
+                )
             
             # Create directory for this owner: {owner_ip}_{owner_port}
             owner_dir = owned_storage_base / f"{owner_ip}_{owner_port}"
@@ -1648,6 +1668,38 @@ class Peer:
         
         if len(file_data) > config.MAX_FILE_SIZE:
             return {"success": False, "error": f"File too large (max {config.MAX_FILE_SIZE} bytes)"}
+
+        # Ask tracker to select best storage peers based on owned-storage usage.
+        # This makes the tracker responsible for choosing storage peers in a more P2P-friendly way.
+        try:
+            request_msg = messages.create_message(
+                messages.MessageType.REQUEST_STORAGE_PEERS,
+                owner_ip=self.peer_ip,
+                owner_port=self.peer_port,
+                replication=replication,
+            )
+            storage_response = self._send_to_tracker(request_msg)
+            if storage_response and storage_response.get("type") == messages.MessageType.STORAGE_PEERS_RESPONSE:
+                peers_from_tracker = storage_response.get("peers", [])
+                if peers_from_tracker:
+                    target_peers = [(p["ip"], p["port"]) for p in peers_from_tracker]
+                    logger.info(
+                        f"Tracker selected {len(target_peers)} storage peer(s) for owned file {filename}: "
+                        f"{target_peers}"
+                    )
+                else:
+                    logger.warning("Tracker returned no storage peers, falling back to provided target_peers")
+            else:
+                if storage_response and storage_response.get("error"):
+                    logger.warning(
+                        f"REQUEST_STORAGE_PEERS failed: {storage_response.get('error')}, "
+                        "falling back to provided target_peers"
+                    )
+        except Exception as e:
+            logger.warning(f"Error requesting storage peers from tracker: {e}")
+
+        if not target_peers:
+            return {"success": False, "error": "No storage peers available for owned file upload"}
         
         # Encrypt file data
         encrypted_data = self._encrypt_file_data(file_data, self.peer_ip, self.peer_port)
