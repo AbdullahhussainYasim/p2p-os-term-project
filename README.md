@@ -268,7 +268,7 @@ python client.py --port 9001 get-file --filename "remote_copy.txt" --save "downl
 ├── start_multiple_peers.sh # Script to launch the system
 └── README.md             # This file
 ```
-
+<!--
 ## ⚠️ Limitations
 
 This is an academic project and intentionally simplifies or omits several production-grade features:
@@ -277,7 +277,7 @@ This is an academic project and intentionally simplifies or omits several produc
 - **No Authentication**: Any machine on the network can join and participate.
 - **Simulated Scheduling**: The Round-Robin scheduler is non-preemptive.
 - **No Distributed Consensus**: The tracker is a single point of failure.
-
+-->
 ## 🔮 Future Work
 
 - **Sandboxed Execution**: Integrate a secure sandboxing mechanism like Docker containers or `py-sandbox` to safely execute remote code.
