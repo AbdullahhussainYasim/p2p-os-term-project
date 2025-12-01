@@ -1649,15 +1649,16 @@ class Peer:
         except Exception as e:
             logger.warning(f"Failed to reconstruct owned files metadata: {e}")
     
-    def upload_file_to_peer(self, filename: str, file_data: bytes, target_peers: List[Tuple[str, int]], 
-                           replication: int = 1) -> Dict:
+    def upload_file_to_peer(self, filename: str, file_data: bytes, replication: int = 1) -> Dict:
         """
         Upload a file to remote peer(s) with ownership.
+        
+        This method now relies on the tracker to auto-select the best storage peers
+        based on their owned-storage usage. The caller does not choose target peers.
         
         Args:
             filename: Name of the file
             file_data: File contents as bytes
-            target_peers: List of (ip, port) tuples to store the file
             replication: Number of replicas to create (default: 1)
         
         Returns:
@@ -1679,27 +1680,28 @@ class Peer:
                 replication=replication,
             )
             storage_response = self._send_to_tracker(request_msg)
-            if storage_response and storage_response.get("type") == messages.MessageType.STORAGE_PEERS_RESPONSE:
-                peers_from_tracker = storage_response.get("peers", [])
-                if peers_from_tracker:
-                    target_peers = [(p["ip"], p["port"]) for p in peers_from_tracker]
-                    logger.info(
-                        f"Tracker selected {len(target_peers)} storage peer(s) for owned file {filename}: "
-                        f"{target_peers}"
-                    )
-                else:
-                    logger.warning("Tracker returned no storage peers, falling back to provided target_peers")
-            else:
-                if storage_response and storage_response.get("error"):
-                    logger.warning(
-                        f"REQUEST_STORAGE_PEERS failed: {storage_response.get('error')}, "
-                        "falling back to provided target_peers"
-                    )
+            if not storage_response:
+                logger.warning("No response from tracker for REQUEST_STORAGE_PEERS")
+                return {"success": False, "error": "No response from tracker when selecting storage peers"}
+            
+            if storage_response.get("type") != messages.MessageType.STORAGE_PEERS_RESPONSE:
+                error_msg = storage_response.get("error", "Unexpected response from tracker")
+                logger.warning(f"REQUEST_STORAGE_PEERS failed: {error_msg}")
+                return {"success": False, "error": f"Failed to select storage peers: {error_msg}"}
+            
+            peers_from_tracker = storage_response.get("peers", [])
+            if not peers_from_tracker:
+                logger.warning("Tracker returned no storage peers")
+                return {"success": False, "error": "No storage peers available for owned file upload"}
+            
+            target_peers = [(p["ip"], p["port"]) for p in peers_from_tracker]
+            logger.info(
+                f"Tracker selected {len(target_peers)} storage peer(s) for owned file {filename}: "
+                f"{target_peers}"
+            )
         except Exception as e:
             logger.warning(f"Error requesting storage peers from tracker: {e}")
-
-        if not target_peers:
-            return {"success": False, "error": "No storage peers available for owned file upload"}
+            return {"success": False, "error": f"Failed to select storage peers: {e}"}
         
         # Encrypt file data
         encrypted_data = self._encrypt_file_data(file_data, self.peer_ip, self.peer_port)

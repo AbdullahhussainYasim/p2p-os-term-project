@@ -507,7 +507,11 @@ def run_web_ui(peer: Peer, host='127.0.0.1', port=5000, debug=False):
 
 @app.route('/api/file/upload-remote', methods=['POST'])
 def upload_file_to_remote_peer():
-    """Upload a file to a remote peer with ownership."""
+    """Upload a file to remote peer storage with ownership.
+    
+    The backend will ask the tracker to auto-select the best storage peers.
+    The client does not need to specify a target IP/port anymore.
+    """
     if not peer_instance:
         return jsonify({"error": "Peer not initialized"}), 500
     
@@ -520,13 +524,8 @@ def upload_file_to_remote_peer():
         if file.filename == '':
             return jsonify({"error": "No file selected"}), 400
         
-        # Get target peer info from form data
-        target_ip = request.form.get("target_ip")
-        target_port = request.form.get("target_port")
+        # Replication factor (how many storage peers to use)
         replication = int(request.form.get("replication", 1))
-        
-        if not target_ip or not target_port:
-            return jsonify({"error": "target_ip and target_port required"}), 400
         
         # Get file data
         filename = secure_filename(file.filename)
@@ -535,11 +534,10 @@ def upload_file_to_remote_peer():
         if not file_data:
             return jsonify({"error": "File is empty"}), 400
         
-        # Upload to remote peer
+        # Upload to remote peer(s) using tracker-selected storage peers
         result = peer_instance.upload_file_to_peer(
             filename=filename,
             file_data=file_data,
-            target_peers=[(target_ip, int(target_port))],
             replication=replication
         )
         
