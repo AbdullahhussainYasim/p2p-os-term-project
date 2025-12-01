@@ -446,12 +446,10 @@ function setupFormHandlers() {
         
         const fileInput = document.getElementById('remote-upload-file');
         const file = fileInput.files[0];
-        const targetIp = document.getElementById('target-peer-ip').value;
-        const targetPort = parseInt(document.getElementById('target-peer-port').value);
         const replication = parseInt(document.getElementById('replication-count').value) || 1;
         
-        if (!file || !targetIp || !targetPort) {
-            showToast('Please fill in all required fields and select a file', 'error');
+        if (!file) {
+            showToast('Please select a file to upload', 'error');
             return;
         }
         
@@ -462,8 +460,6 @@ function setupFormHandlers() {
             // Create FormData for file upload
             const formData = new FormData();
             formData.append('file', file);
-            formData.append('target_ip', targetIp);
-            formData.append('target_port', targetPort);
             formData.append('replication', replication);
             
             const response = await fetch('/api/file/upload-remote', {

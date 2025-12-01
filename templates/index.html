@@ -271,31 +271,14 @@
             <div class="form-section" style="margin-top: 30px;">
                 <h3>Upload File to Remote Peer (Owned Storage)</h3>
                 <p class="description-text" style="margin-bottom: 15px; color: #6c757d;">
-                    Upload a file from your device to another peer's storage. Only you (the owner) can download it later. 
-                    The file will be encrypted and stored securely on the target peer.
+                    Upload a file from your device to the distributed owned-storage pool. Only you (the owner) can download it later. 
+                    The file will be encrypted and stored securely on storage peers automatically selected by the tracker based on available capacity.
                 </p>
                 <form id="file-upload-remote-form" enctype="multipart/form-data">
                     <div class="form-group">
                         <label>Select File from Device:</label>
                         <input type="file" id="remote-upload-file" class="form-control" required>
-                        <small class="form-text text-muted">Choose a file from your device to upload to another peer</small>
-                    </div>
-                    <div class="form-group">
-                        <label>Target Peer IP:</label>
-                        <input type="text" id="target-peer-ip" class="form-control" placeholder="e.g., 192.168.1.100" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Target Peer Port:</label>
-                        <input type="number" id="target-peer-port" class="form-control" placeholder="e.g., 9000" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Available Peers:</label>
-                        <select id="available-peers" class="form-control" onchange="selectPeer()">
-                            <option value="">-- Select a peer --</option>
-                        </select>
-                        <button type="button" onclick="loadAvailablePeers()" class="btn btn-secondary" style="margin-top: 5px;">
-                            <i class="fas fa-sync"></i> Load Available Peers
-                        </button>
+                        <small class="form-text text-muted">Choose a file from your device to upload to the network</small>
                     </div>
                     <div class="form-group">
                         <label>Replication Count:</label>
