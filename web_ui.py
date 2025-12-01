@@ -440,6 +440,54 @@ def get_resource_info():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/deadlock/setup', methods=['POST'])
+def setup_deadlock():
+    """Setup deadlock scenario - called by setup_deadlock.py script."""
+    if not peer_instance:
+        return jsonify({"error": "Peer not initialized"}), 500
+    
+    try:
+        detector = peer_instance.deadlock_detector
+        from deadlock_detector import ResourceType
+        
+        # Register resources if not already registered
+        if "R1" not in detector.resources:
+            detector.register_resource("R1", ResourceType.CPU, 2)
+        if "R2" not in detector.resources:
+            detector.register_resource("R2", ResourceType.MEMORY, 2)
+        
+        # Register processes if not already registered
+        if "P1" not in detector.processes:
+            detector.register_process("P1", {"R1": 2, "R2": 1})
+        if "P2" not in detector.processes:
+            detector.register_process("P2", {"R1": 1, "R2": 2})
+        
+        # Manually create deadlock
+        with detector.lock:
+            # P1 gets all of R1
+            detector.resources["R1"].available_units = 0
+            detector.resources["R1"].allocated["P1"] = 2
+            detector.processes["P1"]["allocation"]["R1"] = 2
+            detector.processes["P1"]["need"]["R1"] = 0
+            
+            # P2 gets all of R2
+            detector.resources["R2"].available_units = 0
+            detector.resources["R2"].allocated["P2"] = 2
+            detector.processes["P2"]["allocation"]["R2"] = 2
+            detector.processes["P2"]["need"]["R2"] = 0
+        
+        # Verify deadlock
+        deadlock, processes = detector.detect_deadlock()
+        
+        return jsonify({
+            "success": True,
+            "deadlock": deadlock,
+            "deadlocked_processes": processes
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def run_web_ui(peer: Peer, host='127.0.0.1', port=5000, debug=False):
     """
     Run the web UI server.
